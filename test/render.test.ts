@@ -1,0 +1,148 @@
+import assert from "node:assert/strict";
+import { test } from "node:test";
+import { initTheme } from "@earendil-works/pi-coding-agent";
+import { safeTitle } from "@everyx/pi-ui/width.js";
+import { renderNotification } from "../render.js";
+
+// Fold hints render through keyHint, which reads the real global theme.
+initTheme("dark");
+
+/**
+ * Fake theme: emits real ANSI codes so pi-tui's Text measures true visual
+ * widths (it strips ANSI) — asserting on single lines stays reliable. Tags
+ * would inflate line widths and make Text wrap mid-phrase.
+ */
+const theme = new Proxy(
+	{},
+	{
+		get:
+			(_, key) =>
+			(...args: string[]) =>
+				key === "fg" || key === "bg"
+					? `\x1b[31m${args[1]}\x1b[0m`
+					: key === "bold"
+						? `\x1b[1m${args[0]}\x1b[0m`
+						: key === "italic"
+							? `\x1b[3m${args[0]}\x1b[0m`
+							: String(key),
+	},
+) as never;
+
+function render(component: unknown, width: number): string[] {
+	return (component as { render(w: number): string[] }).render(width);
+}
+
+/**
+ * Rendered text joined across lines — fake-theme tags inflate line widths and
+ * make Text wrap mid-phrase, so assertions match on the joined text instead of
+ * single lines.
+ */
+function renderText(component: unknown, width: number): string {
+	return render(component, width).map(strip).join("\n");
+}
+
+/** Strip real ANSI (keyHint) + fake-theme tags + trailing width padding. */
+const ANSI_RE = new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, "g");
+function strip(s: string): string {
+	return s
+		.replace(ANSI_RE, "")
+		.replace(/<[^>]+>/g, "")
+		.replace(/\[[a-z]+\]|\[\/[a-z]+\]/g, "")
+		.trim();
+}
+
+test("notification header carries the status icon", () => {
+	const ok = renderNotification(
+		{
+			details: {
+				status: "completed",
+				agent_id: "a1",
+				label: "research db schema",
+				result: "found 5 tables",
+				usage: { durationMs: 27500, tokens: 1250, toolUses: 3 },
+			},
+		},
+		{ expanded: false },
+		theme,
+	);
+	assert.ok(renderText(ok, 120).includes('✓ Agent "research db schema" completed'), "completed icon + word");
+	// The result text must render in the card body (pi-ui message channel).
+	assert.ok(renderText(ok, 120).includes("found 5 tables"), "result text renders in the body");
+
+	const failed = renderNotification(
+		{
+			details: {
+				status: "failed",
+				agent_id: "a1",
+				label: "research db schema",
+				result: "partial",
+				usage: { durationMs: 12000, tokens: 1100, toolUses: 2 },
+			},
+		},
+		{ expanded: false },
+		theme,
+	);
+	assert.ok(renderText(failed, 120).includes('✗ Agent "research db schema" failed'), "failed icon + word");
+
+	const stopped = renderNotification(
+		{
+			details: {
+				status: "stopped",
+				agent_id: "a1",
+				label: "slow query probe",
+				usage: { durationMs: 3200, tokens: 0, toolUses: 0 },
+			},
+		},
+		{ expanded: false },
+		theme,
+	);
+	assert.ok(renderText(stopped, 120).includes('■ Agent "slow query probe" stopped'), "stopped icon + word");
+});
+
+/** The fake theme plus a log of every background key a card asks for. */
+function recordingTheme(seen: string[]): never {
+	return new Proxy(
+		{},
+		{
+			get:
+				(_, key) =>
+				(...args: string[]) => {
+					if (key === "bg") seen.push(String(args[0]));
+					return (theme as unknown as Record<string, (...a: string[]) => string>)[String(key)](...args);
+				},
+		},
+	) as never;
+}
+
+test("notification shell wears pi's custom-message background, never a tool box (#31)", () => {
+	const seen: string[] = [];
+	const t = recordingTheme(seen);
+	for (const status of ["completed", "failed", "stopped"] as const) {
+		// Box applies its background while rendering, so the card must be drawn.
+		renderText(
+			renderNotification(
+				{ details: { status, agent_id: "a1", label: "x", result: "r", usage: {} } },
+				{ expanded: false },
+				t,
+			),
+			120,
+		);
+	}
+	// pi reserves customMessageBg for content that is not a tool call
+	// (compaction/branch/skill summaries, renderer-less messages); the tool boxes
+	// would make this card read as a tool result.
+	assert.deepEqual([...new Set(seen)], ["customMessageBg"], "tool box backgrounds belong to tool cards");
+});
+test("safeTitle flattens newlines and neutralizes embedded quotes", () => {
+	assert.equal(safeTitle('research "db" schema'), "research 'db' schema");
+	assert.equal(safeTitle("line1\nline2\t tab"), "line1 line2  tab");
+	assert.equal(safeTitle("  padded  "), "padded");
+	assert.equal(safeTitle(undefined), "(untitled)");
+});
+
+test("safeTitle caps long titles with a trailing ellipsis", () => {
+	const long = "a".repeat(100);
+	const out = safeTitle(long, 40);
+	assert.equal(out.length, 40);
+	assert.equal(out.endsWith("…"), true);
+});

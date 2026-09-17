@@ -1,4 +1,5 @@
 import { closeSync, fstatSync, openSync, readSync } from "node:fs";
+import { formatStamp } from "./time.js";
 import type { RenderEvent } from "./types.js";
 
 /**
@@ -59,38 +60,73 @@ function contentText(content: unknown, includeToolCalls: boolean): string {
 	return parts.join("\n").trim();
 }
 
+/**
+ * Narrow an untrusted timestamp value to epoch-ms. Accepts a finite numeric
+ * epoch-ms or a parseable date string; anything else (NaN, Infinity,
+ * garbage, objects) is ignored. The `unknown` stays at this boundary.
+ */
+function normalizeTimestamp(value: unknown): number | undefined {
+	if (typeof value === "number") return Number.isFinite(value) ? value : undefined;
+	if (typeof value === "string" && value.trim()) {
+		const parsed = Date.parse(value);
+		return Number.isFinite(parsed) ? parsed : undefined;
+	}
+	return undefined;
+}
+
+/** Derive a message's epoch-ms once: `timestamp` / `ts` / `createdAt`. */
+function messageTimestampMs(message: Record<string, unknown>): number | undefined {
+	return (
+		normalizeTimestamp(message.timestamp) ?? normalizeTimestamp(message.ts) ?? normalizeTimestamp(message.createdAt)
+	);
+}
+
 export function formatTranscriptMessage(
 	message: unknown,
 	perMessageChars = DEFAULT_PER_MESSAGE_CHARS,
+	timestampMs?: number,
+	nowMs: number = Date.now(),
 ): string | undefined {
 	if (!message || typeof message !== "object") return undefined;
+	const prefix =
+		timestampMs !== undefined && Number.isFinite(timestampMs) ? `[${formatStamp(timestampMs, nowMs)}] ` : "";
 	const msg = message as Record<string, unknown>;
 	const role = msg.role;
 	if (role === "user") {
 		const text = contentText(msg.content, false);
-		return text ? `user: ${truncate(text, perMessageChars)}` : "user: [no text]";
+		return text ? `${prefix}user: ${truncate(text, perMessageChars)}` : `${prefix}user: [no text]`;
 	}
 	if (role === "assistant") {
 		const text = contentText(msg.content, true);
 		const suffix = typeof msg.errorMessage === "string" && msg.errorMessage ? `\n[error] ${msg.errorMessage}` : "";
-		return `assistant: ${truncate(text || "[no text yet]", perMessageChars)}${suffix}`;
+		return `${prefix}assistant: ${truncate(text || "[no text yet]", perMessageChars)}${suffix}`;
 	}
 	if (role === "toolResult") {
 		const tool = typeof msg.toolName === "string" ? msg.toolName : "tool";
 		const error = msg.isError === true ? " ERROR" : "";
 		const text = contentText(msg.content, false);
-		return `tool result (${tool}${error}): ${truncate(text || "[no text]", perMessageChars)}`;
+		return `${prefix}tool result (${tool}${error}): ${truncate(text || "[no text]", perMessageChars)}`;
 	}
 	return undefined;
 }
 
-export function formatTranscript(messages: readonly unknown[], options: TranscriptFormatOptions = {}): string {
+export function formatTranscript(
+	messages: readonly unknown[],
+	options: TranscriptFormatOptions = {},
+	nowMs: number = Date.now(),
+): string {
 	const maxMessages = Math.max(1, Math.floor(options.maxMessages ?? DEFAULT_MAX_MESSAGES));
 	const maxChars = Math.max(256, Math.floor(options.maxChars ?? DEFAULT_MAX_CHARS));
 	const perMessageChars = Math.max(128, Math.floor(options.perMessageChars ?? DEFAULT_PER_MESSAGE_CHARS));
 	const selected = messages.slice(-maxMessages);
 	const rendered = selected
-		.map((message) => formatTranscriptMessage(message, perMessageChars))
+		.map((message) => {
+			// Derived once per message — the timestamp narrowing lives here so
+			// formatTranscriptMessage only ever sees a finite epoch-ms or nothing.
+			const timestampMs =
+				message && typeof message === "object" ? messageTimestampMs(message as Record<string, unknown>) : undefined;
+			return formatTranscriptMessage(message, perMessageChars, timestampMs, nowMs);
+		})
 		.filter((line): line is string => Boolean(line));
 	if (!rendered.length) return "[no transcript messages yet]";
 
@@ -120,7 +156,7 @@ export interface MonitoringTranscript {
 	rpcError?: string;
 }
 
-function recentSessionMessages(sessionPath: string, maxBytes = 512 * 1024): unknown[] {
+export function recentSessionMessages(sessionPath: string, maxBytes = 512 * 1024): unknown[] {
 	let fd: number | undefined;
 	try {
 		fd = openSync(sessionPath, "r");
@@ -139,9 +175,20 @@ function recentSessionMessages(sessionPath: string, maxBytes = 512 * 1024): unkn
 		for (const line of text.split("\n")) {
 			if (!line.trim()) continue;
 			try {
-				const entry = JSON.parse(line) as { type?: unknown; message?: unknown };
-				if (entry.type === "message" && entry.message && typeof entry.message === "object")
-					messages.push(entry.message);
+				const entry = JSON.parse(line) as { type?: unknown; message?: unknown; timestamp?: unknown };
+				if (entry.type === "message" && entry.message && typeof entry.message === "object") {
+					// The session record's own ISO time is the only clock on this
+					// path — the inner message carries none, so attach it additively
+					// (a copy; the record is never mutated) when the message itself
+					// lacks a usable time. Malformed times are dropped, never thrown.
+					const recordMs = normalizeTimestamp(entry.timestamp);
+					const inner = entry.message as Record<string, unknown>;
+					messages.push(
+						recordMs !== undefined && messageTimestampMs(inner) === undefined
+							? { ...inner, timestamp: recordMs }
+							: entry.message,
+					);
+				}
 			} catch {
 				// A concurrently-appended final line can be partial; ignore it.
 			}
@@ -154,11 +201,20 @@ function recentSessionMessages(sessionPath: string, maxBytes = 512 * 1024): unkn
 	}
 }
 
-export function formatRecentActivity(events: readonly RenderEvent[], maxEvents = 20, maxChars = 4_000): string {
+export function formatRecentActivity(
+	events: readonly RenderEvent[],
+	maxEvents = 20,
+	maxChars = 4_000,
+	nowMs: number = Date.now(),
+): string {
 	const rendered = events.slice(-maxEvents).map((event) => {
-		if (event.kind === "thinking") return "[thinking]";
-		if (event.kind === "tool") return `[tool call] ${event.name}${event.args ? ` ${event.args}` : ""}`;
-		return `assistant: ${event.text}`;
+		// Events reconstructed from older data carry no ts — they render
+		// exactly as before (no empty brackets).
+		const prefix =
+			typeof event.ts === "number" && Number.isFinite(event.ts) ? `[${formatStamp(event.ts, nowMs)}] ` : "";
+		if (event.kind === "thinking") return `${prefix}[thinking]`;
+		if (event.kind === "tool") return `${prefix}[tool call] ${event.name}${event.args ? ` ${event.args}` : ""}`;
+		return `${prefix}assistant: ${event.text}`;
 	});
 	if (!rendered.length) return "[no live event transcript yet]";
 	let text = rendered.join("\n\n");

@@ -392,7 +392,7 @@ export class AgentProcess {
 				case "thinking":
 					// Collapse consecutive thinking deltas into one marker.
 					if (this.events[this.events.length - 1]?.kind !== "thinking") {
-						this.events.push({ kind: "thinking" });
+						this.events.push({ kind: "thinking", ts: Date.now() });
 						const activity: AgentActivity = { kind: "thinking", text: "" };
 						this.latestActivity = activity;
 						this.onActivityChange?.(activity);
@@ -409,7 +409,7 @@ export class AgentProcess {
 					// but only the end event carries the complete call, so the earlier
 					// events are deliberately ignored. The row stays visible while the
 					// tool actually executes, mirroring the pre-v0.84 card.
-					this.events.push(ev.activity);
+					this.events.push({ ...ev.activity, ts: Date.now() });
 					this.latestActivity = ev.activity;
 					this.onActivityChange?.(ev.activity);
 					this.onStream?.(ev);
@@ -421,7 +421,7 @@ export class AgentProcess {
 					if (last?.kind === "text") {
 						last.text += ev.delta;
 					} else {
-						this.events.push({ kind: "text", text: ev.delta });
+						this.events.push({ kind: "text", text: ev.delta, ts: Date.now() });
 					}
 					// Widget excerpt reflects the latest streamed text.
 					this.latestActivity = { kind: "text", text: last?.kind === "text" ? last.text : ev.delta };

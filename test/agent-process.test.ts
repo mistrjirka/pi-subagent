@@ -12,6 +12,7 @@ import { describe, it } from "node:test";
 import { AgentProcess, type AgentProcessOptions } from "../agent-process.js";
 import type { AgentActivity, AgentEvent } from "../event-interpret.js";
 import type { RpcClientOptions } from "../rpc-client.js";
+import type { RenderEvent } from "../types.js";
 
 /** Programmable fake standing in for RpcClient. */
 class FakeClient {
@@ -153,6 +154,14 @@ class FakeClient {
 	waitForExit(): Promise<{ code: number | null; signal: string | null }> {
 		return this.exitPromise;
 	}
+}
+
+/** RenderEvent minus the fold timestamp (timestamps are asserted separately). */
+function eventShape(event: RenderEvent): unknown {
+	if (event.kind === "thinking") return { kind: "thinking" };
+	if (event.kind === "tool")
+		return { kind: "tool", name: event.name, args: event.args, ...(event.id === undefined ? {} : { id: event.id }) };
+	return { kind: "text", text: event.text };
 }
 
 function makeAgent(options: Partial<AgentProcessOptions> & { cwd: string }): { agent: AgentProcess; fake: FakeClient } {
@@ -481,7 +490,7 @@ describe("AgentProcess — latest activity", () => {
 			assistantMessageEvent: { type: "text_delta", delta: " world" },
 		});
 
-		assert.deepEqual(agent.getEvents(), [
+		assert.deepEqual(agent.getEvents().map(eventShape), [
 			{ kind: "thinking" },
 			{ kind: "tool", name: "bash", args: "ls" },
 			{ kind: "text", text: "hello world" },
@@ -513,7 +522,7 @@ describe("AgentProcess — latest activity", () => {
 		});
 		fake.emitEvent({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "y" } });
 
-		assert.deepEqual(agent.getEvents(), [
+		assert.deepEqual(agent.getEvents().map(eventShape), [
 			{ kind: "tool", name: "bash", args: "echo hi", id: "call_1" },
 			{ kind: "text", text: "x" },
 			{ kind: "tool", name: "read", args: "a.ts", id: "call_2" },
@@ -839,5 +848,34 @@ describe("AgentProcess — markStopped (explicit-stop terminal marker)", () => {
 		assert.equal(agent.status, "failed");
 		agent.markStopped();
 		assert.equal(agent.status, "failed", "failed is already terminal — not disguised");
+	});
+});
+
+describe("AgentProcess — event timestamps", () => {
+	it("stamps thinking, tool_call and text_delta folds with a fresh ts", async () => {
+		const { agent, fake } = makeAgent({ cwd: "/tmp" });
+		const before = Date.now();
+		fake.emitEvent({
+			type: "message_update",
+			assistantMessageEvent: { type: "thinking_delta", delta: "reasoning..." },
+		});
+		fake.emitEvent({
+			type: "message_update",
+			assistantMessageEvent: { type: "toolcall_end", toolCall: { name: "bash", arguments: { command: "ls" } } },
+		});
+		fake.emitEvent({
+			type: "message_update",
+			assistantMessageEvent: { type: "text_delta", delta: "hello" },
+		});
+		const after = Date.now();
+		const events = agent.getEvents();
+		assert.equal(events.length, 3);
+		for (const event of events) {
+			assert.equal(typeof event.ts, "number");
+			assert.ok(
+				event.ts !== undefined && event.ts >= before && event.ts <= after,
+				"ts is fresh (no clock assertions beyond monotonic-ish freshness)",
+			);
+		}
 	});
 });

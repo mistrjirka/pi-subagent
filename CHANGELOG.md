@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.6 — local transcript times
+
+- Stamp supervision transcript lines with the system's local wall clock plus a relative age, e.g. `[17:42:03 · 12s ago] assistant: …`. Times use local date getters only, so a machine at UTC+2 shows `17:42:03` for an instant stored as `15:42:03Z`; a line from another local day shows `MM-DD HH:MM` instead. An absent or unusable time renders exactly as before, with no brackets.
+- Stamp all three transcript sources: live RPC messages, the persisted child-session fallback, and the in-memory event trace. The persisted path previously discarded the record's own `timestamp`, so after an RPC failure the transcript carried no times at all.
+- Add an optional `ts` to the in-memory `RenderEvent` fold so the event-trace path can be stamped too. Additive only — the card, widget, preview and tree renderers ignore it, and no wire shape changed: `status.json`, `control/*`, `events.jsonl` and the tool/notification details are untouched.
+
 ## 0.4.5 — stopped agents stop reporting
 
 - Stop leaking a live status heartbeat when a resident agent is stopped. `agent_stop` on a persistent agent that had already completed left that agent's control bridge running, so `status.json` kept reporting `idle` with a fresh `updatedAt` for the entire life of the hosting Pi process — a dead child looked permanently live to any external reader, and the bridge kept a 200 ms timer plus two status writes per tick alive with it.

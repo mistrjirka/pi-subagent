@@ -18,9 +18,9 @@ import type { NestedCounters } from "./nested-fold.js";
  * single latest-activity row.
  */
 export type RenderEvent =
-	| { kind: "thinking" }
-	| { kind: "tool"; name: string; args?: string; id?: string }
-	| { kind: "text"; text: string };
+	| { kind: "thinking"; ts?: number }
+	| { kind: "tool"; name: string; args?: string; id?: string; ts?: number }
+	| { kind: "text"; text: string; ts?: number };
 
 /**
  * Tool-output details for the Agent tool (carried in pi's `details` field).

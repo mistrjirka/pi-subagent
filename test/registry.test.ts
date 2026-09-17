@@ -19,6 +19,8 @@ class FakeAgent implements RegisteredAgent {
 	readonly agentId: string;
 	readonly label: string;
 	readonly persistent?: boolean;
+	readonly startedAt = Date.now();
+	status: "queued" | "running" | "completed" | "failed" | "stopped" = "running";
 	stoppedByControl = false;
 	stopCalls = 0;
 	stopped = false;
@@ -40,6 +42,7 @@ class FakeAgent implements RegisteredAgent {
 	async stop(): Promise<void> {
 		this.stopCalls++;
 		this.stopped = true;
+		this.status = "stopped";
 		// AgentProcess.stop() semantics: any stop flags the agent as
 		// user-controlled — later completions must not notify.
 		this.stoppedByControl = true;
@@ -297,6 +300,24 @@ describe("AgentRegistry — explicit wait", () => {
 		assert.equal(agent.stopCalls, 0);
 	});
 
+	it("a wait timeout returns null and leaves the child running", async () => {
+		const registry = new AgentRegistry({ notify: () => {}, supervisionIntervalMs: 0 });
+		const agent = new FakeAgent("a1");
+		registry.register(agent);
+		assert.equal(await registry.waitForSettlement("a1", undefined, 5), null);
+		assert.equal(registry.lookup("a1"), agent);
+		assert.equal(agent.stopCalls, 0);
+		assert.equal(agent.status, "running");
+	});
+
+	it("timeout 0 returns an immediate live snapshot sentinel", async () => {
+		const registry = new AgentRegistry({ notify: () => {}, supervisionIntervalMs: 0 });
+		const agent = new FakeAgent("a1");
+		registry.register(agent);
+		assert.equal(await registry.waitForSettlement("a1", undefined, 0), null);
+		assert.equal(agent.stopCalls, 0);
+	});
+
 	it("clears the old settlement when agent_send starts a new turn", async () => {
 		const { registry } = makeRegistry(null);
 		const agent = new FakeAgent("a1", "stay", true);
@@ -312,6 +333,73 @@ describe("AgentRegistry — explicit wait", () => {
 		assert.equal(resolved, false);
 		registry.recordSettlement("a1", { completion: completion({ output: "new" }) });
 		assert.equal((await waiting)?.completion.output, "new");
+	});
+});
+
+describe("AgentRegistry — supervision reminders", () => {
+	it("starts the 3-minute-style clock only after the parent ends its turn", async () => {
+		const reminders: string[] = [];
+		const registry = new AgentRegistry({
+			notify: () => {},
+			remind: (agent) => {
+				reminders.push(agent.agentId);
+			},
+			supervisionIntervalMs: 10,
+		});
+		const agent = new FakeAgent("a1");
+		registry.register(agent);
+		registry.startSupervision("a1");
+		await new Promise((resolve) => setTimeout(resolve, 14));
+		assert.deepEqual(reminders, [], "active parent turn suppresses fallback reminders");
+		registry.parentBecameIdle();
+		await new Promise((resolve) => setTimeout(resolve, 14));
+		assert.deepEqual(reminders, ["a1"]);
+		registry.parentBecameActive();
+		const count = reminders.length;
+		await new Promise((resolve) => setTimeout(resolve, 14));
+		assert.equal(reminders.length, count, "new parent turn pauses the reminder clock");
+		await registry.stopAndRemove("a1");
+	});
+
+	it("reminds repeatedly while a tracked child remains unsupervised", async () => {
+		const reminders: string[] = [];
+		const registry = new AgentRegistry({
+			notify: () => {},
+			remind: (agent) => {
+				reminders.push(agent.agentId);
+			},
+			supervisionIntervalMs: 10,
+		});
+		const agent = new FakeAgent("a1");
+		registry.register(agent);
+		registry.startSupervision("a1");
+		registry.parentBecameIdle();
+		await new Promise((resolve) => setTimeout(resolve, 28));
+		assert.ok(reminders.length >= 2, `expected repeated reminders, got ${reminders.length}`);
+		await registry.stopAndRemove("a1");
+		const afterStop = reminders.length;
+		await new Promise((resolve) => setTimeout(resolve, 15));
+		assert.equal(reminders.length, afterStop, "stopped agents no longer remind");
+	});
+
+	it("an active wait pauses reminders and timeout restarts the clock", async () => {
+		const reminders: string[] = [];
+		const registry = new AgentRegistry({
+			notify: () => {},
+			remind: (agent) => {
+				reminders.push(agent.agentId);
+			},
+			supervisionIntervalMs: 10,
+		});
+		const agent = new FakeAgent("a1");
+		registry.register(agent);
+		registry.startSupervision("a1");
+		registry.parentBecameIdle();
+		assert.equal(await registry.waitForSettlement("a1", undefined, 22), null);
+		assert.deepEqual(reminders, [], "no reminder while the parent is actively waiting");
+		await new Promise((resolve) => setTimeout(resolve, 14));
+		assert.deepEqual(reminders, ["a1"], "clock restarts after the wait window ends");
+		await registry.stopAndRemove("a1");
 	});
 });
 

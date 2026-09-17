@@ -13,7 +13,8 @@ The runtime deliberately does very little orchestration. The **parent Pi decides
 - **All normal Pi tools.** The runtime does not impose per-agent tool allowlists.
 - **Explicit delegation.** A child may spawn only exact agent names listed in its profile's `allowed_subagents`. Omitted means none.
 - **Persistent workers.** A child can stay resident after finishing and be continued with `agent_send` in the same context.
-- **Explicit wait.** `agent_wait` blocks on a direct background/resumed child with no framework timeout; no shell sleep/poll loop is needed.
+- **Explicit wait.** `agent_wait` can block indefinitely or use a supervision window; expiry returns live activity and never stops the child, so shell sleep/poll loops are unnecessary.
+- **Fallback supervision.** When the root parent ends a turn with a background/resumed child still running, a 3-minute unsupervised clock starts. The reminder includes latest activity and repeats after later idle turns until the parent waits, steers, stops, or the child settles.
 - **Clarification path.** `ask_parent` lets a child yield when material information is missing; its immediate parent answers the same resident context with `agent_send`.
 - **PiTTy bridge.** Spawn details expose a small direct-control directory for live inspection, steer, and stop. This does not emulate the old `pi-subagents` workflow runtime.
 
@@ -196,7 +197,17 @@ Wait for a direct child that is running in the background or has been resumed wi
 { "agent_id": "@max" }
 ```
 
-There is no framework timeout. The call returns when that child completes/fails/stops, or when it reaches `ask_parent`. If the child already settled, the cached settlement is returned immediately. Use this instead of shell `sleep`/poll loops.
+The call returns when that child completes/fails/stops, or when it reaches `ask_parent`. If the child already settled, the cached settlement is returned immediately. `timeout_seconds` limits only the **wait window**; it never stops the child:
+
+```json
+{ "agent_id": "@max", "timeout_seconds": 150 }
+```
+
+When the 150-second window expires, the result says the child is still running and includes its latest known activity. If progress is sensible, call `agent_wait` again; otherwise use `agent_send` or `agent_stop`. `timeout_seconds: 0` is an immediate status snapshot. Omit the field to wait indefinitely.
+
+For root background/resumed children, the runtime also has a fallback supervision reminder: when the root parent ends its turn with a child still running, it starts a 3-minute unsupervised clock. If the parent has not resumed supervision before that window expires, the runtime injects a follow-up telling the parent to check the child and includes the latest activity. A new parent turn pauses the clock; if that turn ends with the child still running, a fresh 3-minute window begins. This is **not** a task timeout and never cancels the child.
+
+Use `agent_wait` instead of shell `sleep`/poll loops.
 
 ### `agent_send`
 

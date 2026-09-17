@@ -22,6 +22,7 @@
 
 import type { WidgetResult } from "@everyx/pi-ui/widget.js";
 import type { AgentCompletion } from "./agent-process.js";
+import type { AgentActivity } from "./event-interpret.js";
 import { randomAgentName } from "./name-gen.js";
 import { type AgentMessage, type AgentQuestion, type RouteDecision, routeMessage } from "./protocol.js";
 
@@ -31,10 +32,14 @@ export interface RegisteredAgent {
 	readonly label: string;
 	readonly model?: string;
 	readonly thinking?: string;
+	readonly startedAt?: number;
+	status?: "queued" | "running" | "completed" | "failed" | "stopped";
 	/** Resident after completion (idle) — explicit opt-in; complete() keeps it. */
 	readonly persistent?: boolean;
 	/** Runtime residency can also be activated by ask_parent. */
 	readonly shouldStayResident?: boolean;
+	/** Latest live activity used by wait-timeout/supervision snapshots. */
+	getLatestActivity?: () => AgentActivity | undefined;
 	/** Deliver one in-tree message to this agent (AgentProcess.sendMessage). */
 	sendMessage?: (text: string) => Promise<boolean>;
 	stoppedByControl: boolean;
@@ -63,6 +68,10 @@ export interface WidgetSurface {
 interface AgentRegistryDeps {
 	/** Deliver a completion notification (index.ts wraps pi.sendMessage). */
 	notify: (agent: RegisteredAgent, completion: AgentCompletion) => Promise<void> | void;
+	/** Fallback supervision reminder for a child left running without an active wait/steer. */
+	remind?: (agent: RegisteredAgent, unsupervisedMs: number) => Promise<void> | void;
+	/** Default 3 minutes. Set <= 0 to disable reminders. */
+	supervisionIntervalMs?: number;
 	/** Lazy widget access — null in non-TUI modes. */
 	getWidget?: () => WidgetSurface | null;
 	/** This process is itself a child agent ("@parent" is deliverable upward). */
@@ -76,12 +85,21 @@ export class AgentRegistry {
 	private readonly hasParent: boolean;
 	/** Latest settled turn for each id; retained so agent_wait can arrive after the notification. */
 	private readonly settlements = new Map<string, AgentSettlement>();
-	private readonly settlementWaiters = new Map<string, Set<(settlement: AgentSettlement | undefined) => void>>();
+	private readonly settlementWaiters = new Map<string, Set<(settlement: AgentSettlement | null | undefined) => void>>();
+	private readonly remind: NonNullable<AgentRegistryDeps["remind"]>;
+	private readonly supervisionIntervalMs: number;
+	private readonly supervisionTimers = new Map<string, ReturnType<typeof setTimeout>>();
+	private readonly supervisedAgents = new Set<string>();
+	private parentActive = true;
+	private readonly activeWaits = new Map<string, number>();
+	private readonly lastSupervisedAt = new Map<string, number>();
 	/** Names handed out this session — re-roll on collision (pool ~200). */
 	private readonly usedNames = new Set<string>();
 
 	constructor(deps: AgentRegistryDeps) {
 		this.notify = deps.notify;
+		this.remind = deps.remind ?? (() => {});
+		this.supervisionIntervalMs = deps.supervisionIntervalMs ?? 180_000;
 		this.getWidget = deps.getWidget ?? (() => null);
 		this.hasParent = deps.hasParent ?? false;
 	}
@@ -111,6 +129,7 @@ export class AgentRegistry {
 
 	/** Record a child turn settling and wake any explicit agent_wait callers. Returns true when a waiter consumed it live. */
 	recordSettlement(agentId: string, settlement: AgentSettlement): boolean {
+		this.stopSupervision(agentId);
 		this.settlements.set(agentId, settlement);
 		const waiters = this.settlementWaiters.get(agentId);
 		if (!waiters?.size) return false;
@@ -119,26 +138,144 @@ export class AgentRegistry {
 		return true;
 	}
 
-	/** Block without a framework timeout until this direct child settles. */
-	async waitForSettlement(agentId: string, signal?: AbortSignal): Promise<AgentSettlement | undefined> {
+	/** Start/restart fallback supervision for a live direct child. */
+	startSupervision(agentId: string): void {
+		if (this.supervisionIntervalMs <= 0 || !this.agents.has(agentId)) return;
+		this.supervisedAgents.add(agentId);
+		this.lastSupervisedAt.set(agentId, Date.now());
+		this.scheduleSupervision(agentId);
+	}
+
+	/** Parent started/resumed a model turn: reminders are unnecessary while it is actively supervising. */
+	parentBecameActive(): void {
+		this.parentActive = true;
+		for (const timer of this.supervisionTimers.values()) clearTimeout(timer);
+		this.supervisionTimers.clear();
+	}
+
+	/** Parent ended its turn: begin a fresh unsupervised window for every live tracked child. */
+	parentBecameIdle(): void {
+		this.parentActive = false;
+		const now = Date.now();
+		for (const agentId of this.supervisedAgents) {
+			this.lastSupervisedAt.set(agentId, now);
+			this.scheduleSupervision(agentId);
+		}
+	}
+
+	/** Reset an already-active supervision clock without enabling supervision for a new child. */
+	touchSupervision(agentId: string): void {
+		if (!this.supervisedAgents.has(agentId)) {
+			return;
+		}
+		this.lastSupervisedAt.set(agentId, Date.now());
+		this.scheduleSupervision(agentId);
+	}
+
+	private scheduleSupervision(agentId: string): void {
+		const existing = this.supervisionTimers.get(agentId);
+		if (existing) clearTimeout(existing);
+		this.supervisionTimers.delete(agentId);
+		if (
+			this.supervisionIntervalMs <= 0 ||
+			this.parentActive ||
+			!this.supervisedAgents.has(agentId) ||
+			(this.activeWaits.get(agentId) ?? 0) > 0
+		)
+			return;
+		const agent = this.agents.get(agentId);
+		if (!agent || (agent.status && agent.status !== "running" && agent.status !== "queued")) return;
+		const timer = setTimeout(() => {
+			this.supervisionTimers.delete(agentId);
+			const current = this.agents.get(agentId);
+			if (!current || (current.status && current.status !== "running" && current.status !== "queued")) return;
+			if (this.parentActive || (this.activeWaits.get(agentId) ?? 0) > 0) return;
+			const now = Date.now();
+			const since = now - (this.lastSupervisedAt.get(agentId) ?? now);
+			this.lastSupervisedAt.set(agentId, now);
+			void Promise.resolve(this.remind(current, since)).catch(() => {});
+			this.scheduleSupervision(agentId);
+		}, this.supervisionIntervalMs);
+		this.supervisionTimers.set(agentId, timer);
+	}
+
+	private pauseSupervision(agentId: string): void {
+		const n = (this.activeWaits.get(agentId) ?? 0) + 1;
+		this.activeWaits.set(agentId, n);
+		const timer = this.supervisionTimers.get(agentId);
+		if (timer) clearTimeout(timer);
+		this.supervisionTimers.delete(agentId);
+	}
+
+	private resumeSupervision(agentId: string): void {
+		const n = Math.max(0, (this.activeWaits.get(agentId) ?? 0) - 1);
+		if (n) this.activeWaits.set(agentId, n);
+		else this.activeWaits.delete(agentId);
+		if (!this.supervisedAgents.has(agentId)) return;
+		this.lastSupervisedAt.set(agentId, Date.now());
+		if (n === 0) this.scheduleSupervision(agentId);
+	}
+
+	private stopSupervision(agentId: string): void {
+		const timer = this.supervisionTimers.get(agentId);
+		if (timer) clearTimeout(timer);
+		this.supervisionTimers.delete(agentId);
+		this.supervisedAgents.delete(agentId);
+		this.activeWaits.delete(agentId);
+		this.lastSupervisedAt.delete(agentId);
+	}
+
+	/**
+	 * Block until this direct child settles. When timeoutMs is provided, null
+	 * means the child is still running; the timeout never stops the child.
+	 */
+	async waitForSettlement(
+		agentId: string,
+		signal?: AbortSignal,
+		timeoutMs?: number,
+	): Promise<AgentSettlement | null | undefined> {
 		const cached = this.settlements.get(agentId);
 		if (cached) return cached;
 		if (!this.agents.has(agentId)) return undefined;
 		if (signal?.aborted) throw new Error("agent_wait cancelled");
-		return await new Promise<AgentSettlement | undefined>((resolve, reject) => {
+		if (timeoutMs !== undefined && (!Number.isFinite(timeoutMs) || timeoutMs < 0)) {
+			throw new Error("agent_wait timeout must be a finite non-negative duration");
+		}
+		this.pauseSupervision(agentId);
+		if (timeoutMs === 0) {
+			this.resumeSupervision(agentId);
+			return null;
+		}
+		return await new Promise<AgentSettlement | null | undefined>((resolve, reject) => {
 			const waiters = this.settlementWaiters.get(agentId) ?? new Set();
-			const finish = (settlement: AgentSettlement | undefined) => {
+			let timer: ReturnType<typeof setTimeout> | undefined;
+			const cleanup = () => {
 				signal?.removeEventListener("abort", onAbort);
+				if (timer) clearTimeout(timer);
+				this.resumeSupervision(agentId);
+			};
+			const finish = (settlement: AgentSettlement | null | undefined) => {
+				cleanup();
 				resolve(settlement);
 			};
-			const onAbort = () => {
+			const detachWaiter = () => {
 				waiters.delete(finish);
 				if (waiters.size === 0) this.settlementWaiters.delete(agentId);
+			};
+			const onAbort = () => {
+				detachWaiter();
+				cleanup();
 				reject(new Error("agent_wait cancelled"));
 			};
 			waiters.add(finish);
 			this.settlementWaiters.set(agentId, waiters);
 			signal?.addEventListener("abort", onAbort, { once: true });
+			if (timeoutMs !== undefined) {
+				timer = setTimeout(() => {
+					detachWaiter();
+					finish(null);
+				}, timeoutMs);
+			}
 		});
 	}
 
@@ -192,7 +329,10 @@ export class AgentRegistry {
 		const agent = this.agents.get(target);
 		if (!agent?.sendMessage) return false;
 		const ok = await agent.sendMessage(text);
-		if (ok) this.clearSettlement(target);
+		if (ok) {
+			this.clearSettlement(target);
+			this.touchSupervision(target);
+		}
 		// A delivered message woke an idle persistent agent — the widget row
 		// flips back to running (spinner resumes). Harmless for running rows.
 		if (ok) this.getWidget()?.setStatus?.(target, "running");
@@ -226,6 +366,7 @@ export class AgentRegistry {
 
 	/** Stop everything (session shutdown). */
 	async shutdown(): Promise<void> {
+		for (const agentId of this.agents.keys()) this.stopSupervision(agentId);
 		for (const waiters of this.settlementWaiters.values()) for (const resolve of waiters) resolve(undefined);
 		this.settlementWaiters.clear();
 		for (const agent of this.agents.values()) {
@@ -236,6 +377,7 @@ export class AgentRegistry {
 	}
 
 	private remove(agentId: string, result?: WidgetResult): void {
+		this.stopSupervision(agentId);
 		// Only touch the widget for agents we actually tracked — a spawn-
 		// failure completion never registered, so delete() returns false and
 		// the widget stays untouched (no spurious requestRender).

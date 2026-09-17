@@ -202,6 +202,7 @@ interface SpawnParams {
 /** agent_wait tool params. */
 interface WaitParams {
 	agent_id: string;
+	timeout_seconds?: number;
 }
 
 /** agent_stop tool params. */
@@ -268,6 +269,13 @@ const SpawnParamsSchema = buildSpawnParamsSchema(HAS_PARENT);
 
 const WaitParamsSchema = Type.Object({
 	agent_id: Type.String({ description: 'The direct child id to wait for (e.g. "@max").' }),
+	timeout_seconds: Type.Optional(
+		Type.Number({
+			minimum: 0,
+			description:
+				"Optional wait-window timeout in seconds. Expiry returns a live status snapshot and never stops the child. Omit to wait indefinitely; 0 returns an immediate snapshot.",
+		}),
+	),
 });
 
 const StopParamsSchema = Type.Object({
@@ -295,6 +303,16 @@ const AskParentParamsSchema = Type.Object({
 });
 
 // ─── Helpers ─────────────────────────────────────────────────
+
+const SUPERVISION_REMINDER_MS = 180_000;
+
+function activitySummary(activity: AgentActivity | undefined): string {
+	if (!activity) return "no recent activity reported";
+	if (activity.kind === "thinking") return "thinking";
+	if (activity.kind === "tool") return `${activity.name}${activity.args ? ` — ${activity.args}` : ""}`;
+	const text = activity.text.replace(/\s+/g, " ").trim();
+	return text ? `writing — ${Array.from(text).slice(-180).join("")}` : "writing";
+}
 
 function toErrorResult(err: unknown): {
 	content: { type: "text"; text: string }[];
@@ -404,10 +422,41 @@ export default function (pi: ExtensionAPI) {
 	// and the in-tree routing (direct children only — per-hop O(1)).
 	const registry = new AgentRegistry({
 		notify: (agent, completion) => notifyCompletion(pi, agent, completion),
+		...(!HAS_PARENT
+			? {
+					remind: (agent: Parameters<typeof notifyCompletion>[1], unsupervisedMs: number) => {
+						const minutes = Math.max(1, Math.round(unsupervisedMs / 60_000));
+						const activity = activitySummary(agent.getLatestActivity?.());
+						pi.sendMessage(
+							{
+								customType: "subagent-supervision",
+								content:
+									`Subagent @${agent.agentId} has been running unsupervised for about ${minutes} minute${minutes === 1 ? "" : "s"}. ` +
+									`Latest activity: ${activity}. Check whether it is making sensible progress. ` +
+									"If it is fine, continue supervision with agent_wait (normally a 150-second window); otherwise steer it with agent_send or stop it. Do not use shell sleep or polling.",
+								display: true,
+								details: {
+									agentId: agent.agentId,
+									label: agent.label,
+									state: agent.status ?? "running",
+									activity: agent.getLatestActivity?.(),
+									unsupervisedMs,
+								},
+							},
+							{ deliverAs: "followUp", triggerTurn: true },
+						);
+					},
+					supervisionIntervalMs: SUPERVISION_REMINDER_MS,
+				}
+			: {}),
 		getWidget: () => widgetSurface(),
 		hasParent: HAS_PARENT,
 	});
 	const controlBridges = new Set<ExternalControlBridge>();
+	if (!HAS_PARENT) {
+		pi.on("agent_start", () => registry.parentBecameActive());
+		pi.on("agent_end", () => registry.parentBecameIdle());
+	}
 
 	// Inbound messages (a child addresses @parent, forwards a sibling's
 	// message, or reports an unroutable target) land here from its rpc event
@@ -693,8 +742,13 @@ export default function (pi: ExtensionAPI) {
 						parentAgentId: MY_AGENT_ID || "root",
 					},
 					{
-						steer: async (message) =>
-							registry.lookup(agentId) ? registry.deliver(agentId, message) : agent.sendMessage(message),
+						steer: async (message) => {
+							const ok = registry.lookup(agentId)
+								? await registry.deliver(agentId, message)
+								: await agent.sendMessage(message);
+							if (ok && !HAS_PARENT) registry.startSupervision(agentId);
+							return ok;
+						},
 						stop: async () => {
 							if (registry.lookup(agentId)) {
 								const stopped = await registry.stopAndRemove(agentId);
@@ -733,6 +787,7 @@ export default function (pi: ExtensionAPI) {
 							onBackgroundSettled: (a) => {
 								ensureWidget(ctx); // widget row added via the registry (non-TUI: no-op)
 								registry.register(a as AgentProcess);
+								if (!HAS_PARENT) registry.startSupervision(a.agentId);
 								tree.add(a, "running"); // up-report: my child exists
 								void a
 									.waitForCompletion()
@@ -959,11 +1014,12 @@ export default function (pi: ExtensionAPI) {
 		name: "agent_wait",
 		label: "Wait for Agent",
 		description:
-			"Block until a direct child settles, fails/stops, or asks its parent a question. There is no framework timeout. If the child already settled, return the cached settlement immediately.",
+			"Wait for a direct child to settle, fail/stop, or ask its parent a question. timeout_seconds limits only this wait call: expiry returns a live snapshot and never stops the child. Omit it to wait indefinitely.",
 		promptSnippet: "Wait for a background or resumed child to settle",
 		promptGuidelines: [
 			"Use agent_wait when a background child's result becomes the next dependency instead of polling shell/status output.",
-			"agent_wait has no framework deadline. A long-running child keeps the call blocked until it settles, is stopped, or asks for parent input.",
+			"For supervision, a 150-second wait window is a useful cadence. A wait timeout never stops the child; inspect the returned latest activity and wait again when progress is sensible.",
+			"Omit timeout_seconds when you truly want to block until settlement. timeout_seconds: 0 returns an immediate live snapshot.",
 			"If agent_wait returns an ask_parent question, answer that same child with agent_send; call agent_wait again only after the answer when you need the resumed result.",
 		],
 		parameters: WaitParamsSchema,
@@ -974,12 +1030,46 @@ export default function (pi: ExtensionAPI) {
 			const rawId = params.agent_id?.trim();
 			const agentId = rawId?.replace(/^@/, "");
 			if (!agentId) return toErrorResult("`agent_id` is required.");
-			onUpdate?.({ content: [{ type: "text", text: `Waiting for ${atId(agentId)}…` }], details: { agentId } });
-			let settlement: AgentSettlement | undefined;
+			const timeoutSeconds = params.timeout_seconds;
+			if (timeoutSeconds !== undefined && (!Number.isFinite(timeoutSeconds) || timeoutSeconds < 0)) {
+				return toErrorResult("`timeout_seconds` must be a finite non-negative number.");
+			}
+			const timeoutMs = timeoutSeconds === undefined ? undefined : timeoutSeconds * 1000;
+			const waitLabel = timeoutSeconds === undefined ? "until settlement" : `up to ${timeoutSeconds}s`;
+			onUpdate?.({
+				content: [{ type: "text", text: `Waiting for ${atId(agentId)} (${waitLabel})…` }],
+				details: { agentId, timeoutSeconds },
+			});
+			let settlement: AgentSettlement | null | undefined;
 			try {
-				settlement = await registry.waitForSettlement(agentId, signal);
+				settlement = await registry.waitForSettlement(agentId, signal, timeoutMs);
 			} catch (error) {
 				return toErrorResult(error);
+			}
+			if (settlement === null) {
+				const live = registry.lookup(agentId);
+				if (!live) return toErrorResult(`Agent ${atId(agentId)} stopped being waitable while the wait window expired.`);
+				const activity = live.getLatestActivity?.();
+				const elapsedMs = live.startedAt ? Date.now() - live.startedAt : undefined;
+				const window = timeoutSeconds === 0 ? "Status snapshot" : `Wait window of ${timeoutSeconds}s expired`;
+				return {
+					content: [
+						{
+							type: "text",
+							text:
+								`${window}; ${atId(agentId)} is still ${live.status ?? "running"}. Latest activity: ${activitySummary(activity)}. ` +
+								"The wait window did not stop the agent. If progress is sensible, wait again; otherwise steer with agent_send or stop it.",
+						},
+					],
+					details: {
+						agentId,
+						state: live.status ?? "running",
+						timedOut: timeoutSeconds !== 0,
+						timeoutSeconds,
+						activity,
+						elapsedMs,
+					},
+				};
 			}
 			if (!settlement) return toErrorResult(`Unknown or no-longer-waitable direct child ${atId(agentId)}.`);
 			const completion = settlement.completion;
@@ -1131,6 +1221,7 @@ export default function (pi: ExtensionAPI) {
 				details: { to: target },
 			});
 			const r = await handleMessage(pi, registry, { to: target, from: MY_AGENT_ID, message }, true);
+			if (r.ok && !HAS_PARENT && target !== "@parent" && registry.lookup(target)) registry.startSupervision(target);
 			if (!r.ok) {
 				return {
 					content: [{ type: "text", text: r.error ?? "delivery failed" }],

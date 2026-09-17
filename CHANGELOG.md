@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.0 — supervised waits
+
+- Add optional `timeout_seconds` to `agent_wait`; expiry returns latest child activity without stopping the child.
+- Add a 3-minute fallback supervision reminder that starts when the root parent ends a turn with a background/resumed child still running.
+- Active waits pause the reminder; a wait-window timeout restarts it, and child settlement/stop clears it.
+- Keep the recommended active implementer supervision cadence at 150 seconds while preserving uncapped task lifetime.
+
 ## 0.2.0 — explicit wait and execution defaults
 
 - Add `agent_wait` for blocking on a direct background/resumed child without a framework timeout.

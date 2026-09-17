@@ -102,6 +102,21 @@ describe("runSpawnSession", () => {
 		assert.equal(f.stoppedByControl, true);
 	});
 
+	it("ask_parent waiter stays resident even when the profile is not persistent", async () => {
+		let resident = false;
+		const agent = fakeAgent({ persistent: false, awaitingParent: true });
+		const f = finishedOf(
+			await runSpawnSession(agent, {
+				task: "do",
+				runInBackground: false,
+				hooks: { onResident: () => (resident = true) },
+			}),
+		);
+		assert.equal(f.resident, true);
+		assert.equal(resident, true);
+		assert.ok(!agent.calls.includes("stop"));
+	});
+
 	it("persistent completed → resident outcome, onResident hook, no teardown stop", async () => {
 		let resident = false;
 		const agent = fakeAgent({ persistent: true });

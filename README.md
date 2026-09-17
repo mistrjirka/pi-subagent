@@ -1,182 +1,224 @@
-# pi-subagent
+# @mistrjirka/pi-subagent
 
-[English](README.md) | [中文](README.zh.md)
+A small, profile-driven subagent runtime for [Pi](https://github.com/badlogic/pi-mono), forked from [`@everyx/pi-subagent`](https://github.com/everyx/pi-extensions/tree/master/packages/pi-subagent).
 
-**Pi agents that work together — three primitives, a tree of named agents, no noise.**
+The runtime deliberately does very little orchestration. The **parent Pi decides the workflow**; this extension provides named child processes, communication, persistence, and explicit delegation rules.
 
+## Design
+
+- **No task caps.** No tool-call budget, token budget, turn budget, wall-clock deadline, concurrency ceiling, or nesting-depth ceiling.
+- **No predefined roles.** Agent types are Markdown files you own.
+- **No fallback agent.** An unknown agent name is an error.
+- **Plain-text results.** A subagent finishes with ordinary assistant text. There is no required JSON/Zod/structured-output schema.
+- **All normal Pi tools.** The runtime does not impose per-agent tool allowlists.
+- **Explicit delegation.** A child may spawn only exact agent names listed in its profile's `allowed_subagents`. Omitted means none.
+- **Persistent workers.** A child can stay resident after finishing and be continued with `agent_send` in the same context.
+- **Clarification path.** `ask_parent` lets a child yield when material information is missing; its immediate parent answers the same resident context with `agent_send`.
+- **PiTTy bridge.** Spawn details expose a small direct-control directory for live inspection, steer, and stop. This does not emulate the old `pi-subagents` workflow runtime.
+
+The only forced termination paths are an explicit `agent_stop`, a user/parent abort of a foreground tool call, model/process failure, or shutdown of the hosting Pi process.
+
+## Agent profiles
+
+Profiles are discovered from:
+
+```text
+~/.pi/agent/agents/*.md
+<project>/.pi/agents/*.md
 ```
-You:  Research this project's database schema for me
-  → pi calls agent_spawn, spawns a resident `pi --mode rpc` child
-  → Child works independently in its own context window
-  → Result comes back; you keep chatting
+
+A project profile overrides a global profile with the same exact `name`.
+
+Example implementer:
+
+```markdown
+---
+name: implementer
+description: Implements requested code changes and makes sure the affected code builds.
+allowed_subagents:
+  - explore
+---
+
+Implement the requested change. Keep scope focused on implementation.
+Inspect directly relevant code, use an explore agent when broader codebase discovery is useful,
+and make sure the affected component compiles/builds before reporting completion.
+Do not perform a separate review or acceptance phase; the parent owns orchestration and review.
 ```
 
-## Why?
+Example debugging duck:
 
-Pi has no built‑in sub‑agents. So heavy, parallel, or context‑heavy work crowds into your one window. pi‑subagent moves that work to a child pi: the noise stays there, only the answer comes back.
+```markdown
+---
+name: debugging-duck
+description: Investigates a concrete failure and helps isolate its cause.
+allowed_subagents:
+  - explore
+---
 
-## Features
+Diagnose the reported failure from evidence. Use an explore agent for broader repository discovery when useful.
+Return the diagnosis and concrete next steps as normal text.
+```
 
-- **Quiet context** — logs, search hits, and test output stay in the child's window. You get the final result, not the churn.
-- **True parallel** — fire several background agents at once; each delivers its own notification when done. No queue, no result tool.
-- **Stay in control** — `agent_send` redirects a running agent (or wakes an idle one); `agent_stop` kills it. A child's message up the tree is delivered best-effort (no ack).
-- **Persistent on demand** — spawn with `persistent: true` and the child stays resident after completion: idle at zero tokens, ready to be woken by a later `agent_send` for follow‑ups in the same context — or killed by `agent_stop`.
-- **Pi‑native** — rendering, sessions, and attach all reuse pi's own mechanisms; the cards look like built‑in tools because they are.
-- **Inherit or override** — a child inherits your model and thinking level by default; override it per child. A cheap model for recon, a strong one for the build.
-- **No hidden limits** — no token ceiling, no deadline, no concurrency cap by default. An optional `timeoutMs` adds a guardrail when you want one.
-- **Reviewable** — every session persists and is never deleted; attach any result with `pi --session <path>`.
-- **Nestable** — a child is a full pi instance, so it can spawn another child.
-- **Token economy** — the system side stays lean:
-  - **System prompt** — three tools and terse guidance inject roughly 2–3KB of system prompt (token count drifts with the tokenizer).
-  - **Notification** — the LLM sees only minimal structured data; decoration (label, usage) stays in the render layer.
-  - **Results** — tail‑truncated (2000 lines / 50KB); expand any card for the full transcript.
+Example explorer:
 
-## Comparison with similar extensions
+```markdown
+---
+name: explore
+description: Focused repository/codebase exploration.
+allowed_subagents: []
+---
 
-pi-subagent, [`@tintinweb/pi-subagents`](https://github.com/tintinweb/pi-subagents), and [`pi-subagents`](https://github.com/nicobailon/pi-subagents) all give pi isolated, parallel sub‑agents. They sit on a *primitives → framework* spectrum, and pi-subagent sits at the minimal end: three primitives, no predefined roles, no harness — you compose. What that buys you is in [Features](#features); where the trade‑offs fall is below.
+Investigate the requested area and report the relevant evidence concisely. Do not modify files unless the task explicitly requires it.
+```
 
-| | **pi-subagent** | **@tintinweb/pi-subagents** | **pi-subagents (nicobailon)** |
-|---|---|---|---|
-| Design stance | Minimal primitives | Full framework | Full framework |
-| Tool surface | `agent_spawn` / `agent_stop` / `agent_send` (3) | Claude Code‑style `Agent` / `get_subagent_result` / `steer_subagent` | `subagent` + management/status/control families |
-| Predefined roles | None — defined by prompt | Custom types via `.pi/agents/*.md` (frontmatter) | 8 built‑in (scout / reviewer / worker / oracle…) |
-| Parallelism | Uncap (one process per agent) | Queued, default 4 concurrent | spawn / turn / usage budgets |
-| Default limits | None (optional `timeoutMs`) | Graceful turn limits | turn / usage budgets |
-| Observability | pi‑native cards + widget + `pi --session` | FleetView + conversation viewer | FleetView inspector + fleet |
-| Nesting | Built‑in, no depth cap | Opt‑in, depth cap | Recursion guard |
-| Extras | Token economy, minimal runtime deps, no orphans on reload/crash | Memory, worktree isolation, schedule, cross‑extension RPC, event bus | Missions/scheduling, watchdog, worktree, intercom, chain orchestration |
-| Best for | Owning your own composition | A turnkey sub‑agent system | Built‑in roles + workflow orchestration |
+Example reviewer:
 
-## Install
+```markdown
+---
+name: reviewer
+description: Reviews a completed change and reports concrete findings to the parent.
+allowed_subagents: []
+---
+
+Review the supplied change. Report concrete findings as normal text. The parent decides what to do with them.
+```
+
+With those profiles the delegation graph is:
+
+```text
+root -> any configured agent
+implementer -> explore
+debugging-duck -> explore
+explore -> none
+reviewer -> none
+```
+
+Nothing is hardcoded about those names. Change `allowed_subagents` in the Markdown files to change the graph.
+
+## Model and thinking configuration
+
+`agent_spawn` does **not** accept `model`, `thinking`, `tools`, timeout, or budget arguments.
+
+Model/thinking can be set directly in an agent file:
+
+```yaml
+---
+name: implementer
+model: opencode-go/muse-spark-1.3-contributor
+thinking: medium
+allowed_subagents: [explore]
+---
+```
+
+or centrally in Pi settings under `subagentProfiles`:
+
+```json
+{
+  "subagentProfiles": {
+    "agents": {
+      "implementer": {
+        "model": "opencode-go/muse-spark-1.3-contributor",
+        "thinking": "medium"
+      },
+      "reviewer": {
+        "thinking": "high"
+      }
+    }
+  }
+}
+```
+
+Both `~/.pi/agent/settings.json` and `<project>/.pi/settings.json` are read. Project agent settings override global agent settings. Settings override profile frontmatter for the fields they specify. If neither supplies a value, the child inherits the parent Pi model/thinking level.
+
+## Tools
+
+### `agent_spawn`
+
+```json
+{
+  "agent": "implementer",
+  "prompt": "Implement issue #123. Relevant code is under src/foo.",
+  "persistent": true,
+  "run_in_background": true
+}
+```
+
+Parameters:
+
+- `agent` — exact configured profile name.
+- `prompt` — concrete task. The stable role prompt comes from the profile.
+- `label` — optional UI label; defaults to the profile name.
+- `persistent` — keep the same child context resident after completion.
+- `run_in_background` — root-only; return immediately and notify on completion.
+
+Nested agents do not get `run_in_background`; their parent waits for them directly.
+
+### `agent_send`
+
+Send new instructions to a direct child. If it is idle/persistent or waiting after `ask_parent`, the same context wakes and continues.
+
+```json
+{
+  "to": "@max",
+  "message": "Reviewer found F1 and F2. Fix those and make sure it builds."
+}
+```
+
+### `ask_parent`
+
+Available only inside subagents:
+
+```json
+{
+  "question": "The existing tests and task description disagree about this API behavior. Which behavior is authoritative?",
+  "context": "test A expects X, while the task explicitly describes Y"
+}
+```
+
+The child yields the current turn and remains resident. The immediate spawning agent receives the question and answers that exact child with `agent_send`. This works recursively: an explorer asks its implementer; the implementer can ask the root if it also cannot resolve the ambiguity.
+
+Use this only for material ambiguity or missing information that would make guessing unsafe, not routine implementation decisions.
+
+### `agent_stop`
+
+Explicitly terminate a running or resident child.
+
+## PiTTy integration
+
+Each spawn reports these internal UI fields in tool details:
+
+```text
+runtime: profiled-subagents
+profile
+agentId
+controlDir
+statusPath
+sessionPath
+state
+```
+
+
+`status.json` mirrors the child's current state. PiTTy can write direct control requests under the reported `controlDir`:
+
+```text
+control/steer-requests/*.json
+control/stop.json
+```
+
+The bridge supports direct **steer** and **stop**. It intentionally does not invent pause/resume semantics that Pi itself does not provide for these resident RPC children.
+
+## Output behavior
+
+The child itself returns normal assistant text. The runtime stores ordinary Pi session JSONL and attaches UI metadata separately.
+
+Very large text may be preview-truncated when inserted into the **parent's context** using Pi's normal output protection, while the full child session/output remains available. This is context protection only; it never stops the child or limits how long it works.
+
+## Development
+
+The package requires the same modern Node/Pi stack as the upstream Everyx implementation. Run tests with Node 24+:
 
 ```bash
-# npm (recommended)
-pi install npm:@everyx/pi-subagent
-
-# git
-pi install git:github.com/everyx/pi-subagent
+pnpm test
 ```
 
-Or symlink for development:
-
-```bash
-ln -sf /path/to/pi-extensions/packages/pi-subagent ~/.pi/agent/extensions/subagent
-```
-
-Restart pi, then tell it "ask a sub‑agent to…".
-
-## Quick start
-
-### Kick off a task
-
-```
-Ask a sub‑agent to analyze the auth logic under src/
-```
-
-Pi calls `agent_spawn` (foreground), the child runs in isolation, and the result comes back inline.
-
-### Run several in parallel
-
-```
-Spawn three sub‑agents to look at the auth module, the database layer, and the API routes
-```
-
-Pi issues three `agent_spawn` calls in one block — foreground calls run in parallel, and each call's result carries that agent's final output (no polling, no extra result tool).
-
-### Message or stop
-
-```
-That data‑layer sub‑agent — the approach won't work, rewrite it with composition instead
-```
-
-Pi calls `agent_send` to inject a redirecting message into the running agent (delivered after its current turn settles). To stop a runaway agent: "kill that background sub‑agent" → `agent_stop`. Both work on a running agent; with `persistent: true` they also work after completion — `agent_send` wakes the idle agent for follow‑ups, `agent_stop` kills it.
-
-## Configuration
-
-### Environment variables
-
-| Variable | Default | Meaning |
-|---|---|---|
-| `PI_SUBAGENT_SESSION_DIR` | `<agentDir>/subagent-sessions/` | Where sub‑agent session files live; set to relocate. `<agentDir>` follows pi's agent dir (`~/.pi/agent`, or pi's own `PI_CODING_AGENT_DIR`). |
-
-The directory lives **outside** pi's standard session tree so `pi -r` (resume) stays clean. Sessions are never deleted.
-
-### Tool reference
-
-#### `agent_spawn` — spawn an isolated sub‑agent
-
-| Param | Type | Default | Meaning |
-|---|---|---|---|
-| `prompt` | string | **required** | Self‑contained task description for the sub‑agent. |
-| `label` | string | required | Short label shown on the tool card, notification card, widget row, and session name. |
-| `model` | string | inherited | Override the sub‑agent's model. Specified but not registered → **error, no silent fallback**. |
-| `thinking` | `"off"`…`"max"` | inherited | Override thinking level; omit to run at your current session's level. |
-| `tools` | string[] | all | Whitelist of tool names visible to the sub‑agent — anything else is invisible. |
-| `run_in_background` | boolean | `false` | Foreground (default) blocks until the result is ready. `true` returns an `agent_id` immediately and delivers a completion notification carrying the final output. |
-| `timeoutMs` | number | none | Optional deadline (ms). On firing, the extension stops the child, waits for it to settle, and shuts down gracefully. |
-| `persistent` | boolean | `false` | Keep the child resident (idle, zero tokens) after completion instead of shutting down. A later `agent_send` wakes it to continue the same context; `agent_stop` tears it down. Works for foreground and background spawns. |
-
-#### `agent_stop` — terminate an agent
-
-| Param | Meaning |
-|---|---|
-| `agent_id` | **required** — the id `agent_spawn` returned. Stops a running agent, or an idle `persistent` one. Graceful shutdown (stdin EOF); no completion notification. |
-
-#### `agent_send` — message an agent in the tree
-
-| Param | Meaning |
-|---|---|
-| `to` | **required** — the agent id agent_spawn gave you (a short human name like `max`), or `"@parent"` to message the session that spawned you. |
-| `message` | **required** — the message text; delivered after the target's current turn settles, or wakes an idle persistent agent. |
-
-Messages travel the parent↔child edges of the agent tree: a direct child is delivered straight down, `@parent` goes up, and cross‑level/sibling messages are forwarded through the parent LLM's context along the way.
-
-The LLM is guided by `promptSnippet` + `promptGuidelines` (system‑prompt injection): when to delegate, to keep prompts self‑contained, and to never poll.
-
-## Advanced
-
-### Pick a model
-
-```
-Spawn a sub‑agent with claude-sonnet to analyze the database design
-```
-
-No model specified → inherits your current session's model. Same for `thinking` — omit it and the sub-agent runs at your current level; pass `"off"`…`"max"` to override.
-
-Model **specified but not found** in the registry → error, no silent fallback.
-
-### Restrict tools
-
-```
-Ask a sub‑agent to research the project structure, but only let it use read and grep
-```
-
-Sub‑agent won't see any other tools. Read‑only exploration with a cheaper model is a good pattern for research tasks.
-
-## How it works
-
-Every sub‑agent is a resident `pi --mode rpc` child with a persisted session:
-
-- **Foreground** — `agent_spawn` waits for the child to settle, fetches the final output, then closes stdin (graceful shutdown).
-- **Background** — `agent_spawn` returns immediately; on `agent_settled` the extension delivers a `subagent-notification` (JSON content to the LLM, rendered card to the user) and the child shuts down gracefully.
-- **Send/stop** — `agent_send` delivers a message to the child's stdin (queued while it runs, delivered after its current turn settles); `agent_stop` closes stdin for a graceful shutdown. Both work on a running agent.
-- **Persistent idle** — with `persistent: true` the child stays resident after completion (idle, zero tokens). A later `agent_send` wakes it to continue the same context; `agent_stop` tears it down. The completion notification and widget row carry the `idle` marker.
-- **Attach / review** — sub‑agent sessions live in `<agent dir>/subagent-sessions/` (see [Configuration](#configuration)). Find the session path in the main conversation and run `pi --session <path>` — or ask the LLM, the notification carries the path too.
-- **Graceful turn limits (opt‑in)** — no hidden deadline: a sub‑agent runs until it finishes or is stopped unless you pass `timeoutMs`. No abrupt SIGTERM. No token limits — usage is only reported on the notification card.
-
-## Nested sub‑agents
-
-A child is a full pi instance — so if you installed this extension globally, it spawns children of its own. Each level is its own process with its own context; depth multiplies startup time and token cost. You — or the model — judge when it's worth it.
-
-The mechanism is a pure point-to-point deliverer: `agent_send` delivers to a direct child by its id (a short human name like `max`), or to `"@parent"` — and errors on anything else. Routing is the LLM's job: each agent addresses only the ids it was given, hop by hop (a grandchild reaching the root goes through its parent's LLM deciding to forward with `@parent`). Information disclosure is the only limit — a parent holds the ids of the agents it spawned; nobody knows ids they were never told.
-
-## Costs & caveats
-
-- **Headless children die with the host** (`pi -p`). The main process exits at the end of its reply; background children are then torn down via stdin EOF — never orphaned. Background flows (waiting for the notification, messaging, stopping) are for the always‑alive TUI session.
-- **One process per child.** Foreground and background are the same resident rpc child. Many children = many processes — spawn with care.
-- **One‑shot results.** A background result is delivered once; if the main session dies before delivery, the result survives in the session file (`pi --session <path>`).
-- **Send/stop need an addressable child.** `agent_send` and `agent_stop` target a live child — or, for `persistent` spawns, the resident idle child after completion. A non‑persistent child is gone once its completion notification fires; messaging or stopping it errors.
-
-## Cleanup
-
-When pi exits, sub‑agents (running or idle) get a graceful stdin‑EOF shutdown. Sessions stay on disk for attach/replay — nothing is killed, nothing deleted.
+This fork preserves the original MIT license and credits the upstream implementation history.

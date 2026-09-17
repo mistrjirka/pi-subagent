@@ -29,7 +29,18 @@ export type RenderEvent =
  */
 export type SubagentDetails = {
 	task?: string;
+	/** Identifies this fork's direct-control integration to external UIs. */
+	runtime?: "profiled-subagents";
+	profile?: string;
+	treeId?: string;
+	parentAgentId?: string;
 	agentId?: string;
+	controlDir?: string;
+	statusPath?: string;
+	state?: string;
+	waitingForParent?: boolean;
+	question?: string;
+	context?: string;
 	/** Agent label — used by the background-start status line (the tool header is empty for background). */
 	label?: string;
 	/** Resolved "provider/id" model string, or default when omitted. */

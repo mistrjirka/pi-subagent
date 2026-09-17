@@ -11,14 +11,13 @@
  *   waitForCompletion()  → terminal (completed / failed / stopped)
  *   stop()               → graceful stdin EOF, SIGTERM fallback
  *
- * Token limits: none. A timeoutMs (if set) triggers a hard abort → graceful
- *   settle within the grace window → hard-stop if it never settles. Otherwise
- *   the child runs until it finishes or is stopped via agent_stop.
+ * Task limits: none. The child runs until it finishes, fails, its parent/user
+ * explicitly stops it, or the hosting Pi process exits.
  */
 
 import type { AgentTreeEvent } from "./event-interpret.js";
 import { type AgentActivity, interpretEvent } from "./event-interpret.js";
-import type { AgentMessage, RpcCommand, RpcEvent } from "./protocol.js";
+import type { AgentMessage, AgentQuestion, RpcCommand, RpcEvent } from "./protocol.js";
 import { RpcClient, type RpcClientOptions } from "./rpc-client.js";
 import type { RenderEvent } from "./types.js";
 
@@ -46,26 +45,22 @@ export interface AgentProcessOptions {
 	model?: string;
 	/** Reasoning intensity ("off"…"max"), passed as --thinking. */
 	thinking?: string;
-	/** Tool allowlist (comma-joined into --tools). */
-	tools?: string[];
+	/** Extra role guidance appended to Pi's normal system prompt. */
+	appendSystemPrompt?: string;
 	/** Short task label (notification card). */
 	label: string;
 	/** Short human-readable id ("max", "zoe") assigned by the registry (name-gen.ts). */
 	agentId: string;
 	/** Custom session storage dir (--session-dir) — keeps sub-agent sessions out of `pi -r`. */
 	sessionDir?: string;
-	/** Total wall-clock timeout for the whole task (incl. multi-turn).
-	 *  Omitted = no limit (the default): the child runs until it finishes
-	 *  or is stopped — there is no token limit (SPEC: token 无任何限制). */
-	timeoutMs?: number;
-	/** After an abort, how long to wait for the child to settle before hard-stopping it. */
-	abortSettleGraceMs?: number;
 	/** Streamed assistant text deltas (rpc message_update/text_delta) — for live tool-card output. */
 	onDelta?: (delta: string) => void;
 	/** Thinking/tool activity transitions (no text delta involved) — for live tool-card rows. */
 	onActivityChange?: (activity: AgentActivity) => void;
 	/** In-tree message received from this child (extension_ui_request under the reserved key). */
 	onMessage?: (message: AgentMessage) => void;
+	/** Structured ask_parent request from this child. */
+	onQuestion?: (question: AgentQuestion) => void;
 	/** Tree telemetry from this child's own spawns (extension_ui_request, tree key) — forward or apply. */
 	onTreeEvent?: (event: AgentTreeEvent) => void;
 	/** A woken persistent agent settled: "completed" → idle, "failed" → report + clean up. */
@@ -81,12 +76,10 @@ interface AgentProcessDeps {
 	createClient?: (options: RpcClientOptions) => RpcClient;
 }
 
-const DEFAULT_ABORT_SETTLE_GRACE_MS = 30_000;
 const STOP_GRACE_MS = 5_000;
 
-// The only task-level limit is the opt-in timeoutMs: the Agent tool passes
-// it when the caller wants a bound — the default is no limit (a Pi extension
-// should not impose hidden deadlines on sub-agents).
+// No task-level limits live here. Explicit stop/host shutdown are the only
+// framework lifecycle controls.
 
 export class AgentProcess {
 	readonly agentId: string;
@@ -96,15 +89,22 @@ export class AgentProcess {
 	readonly thinking: string | undefined;
 	/** Resident after completion (idle, zero token) — explicit opt-in. */
 	readonly persistent: boolean;
+	/** True for explicit persistence or a child retained to complete an ask_parent round-trip. */
+	get shouldStayResident(): boolean {
+		return this.persistent || this.awaitingParent;
+	}
 
 	status: AgentStatus = "queued";
 
 	/** True when stop() was called via agent_stop (deliberate user action → no notification). */
 	stoppedByControl = false;
+	/** Child has yielded after ask_parent and is waiting for the spawning agent to answer. */
+	awaitingParent = false;
+	pendingQuestion: AgentQuestion | undefined;
+	/** Keeps a non-persistent child resident only for the ask_parent round-trip. */
+	private questionResident = false;
 
 	private readonly client: RpcClient;
-	private readonly timeoutMs: number | undefined;
-	private readonly abortSettleGraceMs: number;
 
 	private settleWaiters = new Set<() => void>();
 	/** Total agent_settled events seen; lets awaitSettled skip settles that
@@ -113,7 +113,6 @@ export class AgentProcess {
 	/** settleCount observed at the last awaitSettled() call. */
 	private lastSettledCount = 0;
 	private done = false;
-	private hardAborted = false;
 	/** Model API error captured from agent_end (stopReason "error"). */
 	private agentError: string | null = null;
 	/** Latest activity excerpt for the widget. */
@@ -127,21 +126,20 @@ export class AgentProcess {
 	constructor(options: AgentProcessOptions, deps: AgentProcessDeps = {}) {
 		this.agentId = options.agentId;
 		this.label = options.label;
-		this.timeoutMs = options.timeoutMs;
-		this.abortSettleGraceMs = options.abortSettleGraceMs ?? DEFAULT_ABORT_SETTLE_GRACE_MS;
 		this.model = options.model;
 		this.thinking = options.thinking;
 		this.persistent = options.persistent ?? false;
 		this.onDelta = options.onDelta;
 		this.onActivityChange = options.onActivityChange;
 		this.onMessage = options.onMessage;
+		this.onQuestion = options.onQuestion;
 		this.onTreeEvent = options.onTreeEvent;
 		this.onIdle = options.onIdle;
 
 		const args: string[] = [];
 		if (options.model) args.push("--model", options.model);
 		if (options.thinking) args.push("--thinking", options.thinking);
-		if (options.tools && options.tools.length > 0) args.push("--tools", options.tools.join(","));
+		if (options.appendSystemPrompt) args.push("--append-system-prompt", options.appendSystemPrompt);
 		// Label names the session (--name, capped at 80 chars).
 		args.push("--name", options.label.slice(0, 80));
 		if (options.sessionDir) args.push("--session-dir", options.sessionDir);
@@ -200,6 +198,10 @@ export class AgentProcess {
 	 * agent flips it back to running.
 	 */
 	async sendMessage(text: string): Promise<boolean> {
+		// A successful message to an ask_parent waiter is the parent's answer.
+		// Do not clear the waiting state before RPC acceptance: a failed delivery
+		// must leave the question answerable.
+		const wasAwaitingParent = this.awaitingParent;
 		const response = await this.client
 			.sendCommand({ type: "prompt", message: text, streamingBehavior: "steer" })
 			.catch((err: Error) => ({
@@ -209,7 +211,11 @@ export class AgentProcess {
 				error: err.message,
 			}));
 		if (!response.success) return false;
-		// Woke an idle persistent agent — activity resumes.
+		if (wasAwaitingParent) {
+			this.awaitingParent = false;
+			this.pendingQuestion = undefined;
+		}
+		// Woke an idle persistent/waiting agent — activity resumes.
 		if (this.status === "completed") this.status = "running";
 		return true;
 	}
@@ -240,38 +246,15 @@ export class AgentProcess {
 	}
 
 	/**
-	 * Wait until the agent reaches a terminal state.
-	 *
-	 * The wait is bounded by the overall deadline: a child stuck in a hung
-	 * model call would otherwise make us wait forever (issue #10, session
-	 * 019fc63c: sub-agent completed but never settled; only a user interrupt
-	 * released the wait). On deadline we abort, give the child a grace window
-	 * to settle, then hard-stop it.
+	 * Wait until the agent settles or is explicitly stopped/exits. There is no
+	 * task deadline, turn cap, token cap, or tool-call cap in this runtime.
 	 */
 	async waitForCompletion(): Promise<AgentCompletion> {
-		// No deadline when timeoutMs is omitted — the child runs until it
-		// settles or is stopped (no token limit exists). `deadline` stays
-		// undefined so `remaining` is undefined and awaitSettled waits forever
-		// (its own `timeoutMs !== undefined` guard skips the timer).
-		const deadline = this.timeoutMs === undefined ? undefined : Date.now() + this.timeoutMs;
-
-		// Wait for the first settle to resolve, the child to exit (onExit flips
-		// `done`), or the deadline. A deadline with neither is outright stuck:
-		// abort and give the child a bound to settle, hard-stopping if it can't.
-		if (this.status === "running" && !this.done) {
-			const remaining = deadline === undefined ? undefined : Math.max(0, deadline - Date.now());
-			const settled = await this.awaitSettled(remaining);
-			if (!this.done && !settled) {
-				this.hardAborted = true;
-				await this.abortAndWait();
-			}
-		}
+		if (this.status === "running" && !this.done) await this.awaitSettled();
 
 		this.done = true;
 		if (this.status === "stopped") {
-			// Already stopped externally (agent_stop) — keep it.
-		} else if (this.hardAborted) {
-			this.status = "stopped";
+			// Already stopped externally (agent_stop/user abort) — keep it.
 		} else if (this.agentError) {
 			this.status = "failed";
 		} else if (this.client.exitCode !== null && this.client.exitCode !== 0) {
@@ -349,6 +332,7 @@ export class AgentProcess {
 	private readonly onDelta: ((delta: string) => void) | undefined;
 	private readonly onActivityChange: ((activity: AgentActivity) => void) | undefined;
 	private readonly onMessage: ((message: AgentMessage) => void) | undefined;
+	private readonly onQuestion: ((question: AgentQuestion) => void) | undefined;
 	private readonly onTreeEvent: ((event: AgentTreeEvent) => void) | undefined;
 	private readonly onIdle: ((outcome: "completed" | "failed") => void) | undefined;
 
@@ -366,7 +350,7 @@ export class AgentProcess {
 					// Persistent agent woke by sendMessage finished its follow-up
 					// turn — completed goes back to idle; a model error is reported
 					// honestly (never disguised as idle).
-					if (this.done && this.persistent && this.status === "running") {
+					if (this.done && (this.persistent || this.questionResident) && this.status === "running") {
 						this.status = this.agentError ? "failed" : "completed";
 						this.onIdle?.(this.agentError ? "failed" : "completed");
 					}
@@ -407,6 +391,12 @@ export class AgentProcess {
 				case "agent_failed":
 					this.agentError = ev.error;
 					break;
+				case "agent_question":
+					this.awaitingParent = true;
+					this.questionResident = true;
+					this.pendingQuestion = ev.question;
+					this.onQuestion?.(ev.question);
+					break;
 				case "agent_msg":
 					this.onMessage?.(ev.message);
 					break;
@@ -427,49 +417,20 @@ export class AgentProcess {
 		this.settleWaiters.clear();
 	}
 
-	/**
-	 * Resolve true on the next settle, or false after timeoutMs (no timeout
-	 * when omitted). The waiter is removed from the set on either path so a
-	 * late settle can't double-resolve.
-	 */
-	private awaitSettled(timeoutMs?: number): Promise<boolean> {
-		if (this.done) return Promise.resolve(true);
-		// A settle arrived since our last wait — pass through immediately.
+	/** Wait for the next settle with no framework deadline. */
+	private awaitSettled(): Promise<void> {
+		if (this.done) return Promise.resolve();
 		if (this.settleCount > this.lastSettledCount) {
 			this.lastSettledCount = this.settleCount;
-			return Promise.resolve(true);
+			return Promise.resolve();
 		}
 		return new Promise((resolve) => {
-			let timer: NodeJS.Timeout | undefined;
 			const onSettle = () => {
-				if (timer) clearTimeout(timer);
 				this.settleWaiters.delete(onSettle);
 				this.lastSettledCount = this.settleCount;
-				resolve(true);
+				resolve();
 			};
-			if (timeoutMs !== undefined) {
-				timer = setTimeout(() => {
-					this.settleWaiters.delete(onSettle);
-					resolve(false);
-				}, timeoutMs);
-			}
 			this.settleWaiters.add(onSettle);
 		});
-	}
-
-	/**
-	 * Abort the child and wait (bounded) for its settle. An abort can be
-	 * ineffective when the child is stuck — hung model call, wedged run loop:
-	 * if no settle arrives within the grace window, hard-stop the child (stdin
-	 * EOF + SIGTERM fallback) so waitForCompletion can never hang forever.
-	 */
-	private async abortAndWait(): Promise<void> {
-		await this.abort().catch(() => {});
-		const settled = await this.awaitSettled(this.abortSettleGraceMs);
-		if (!settled && !this.done && this.client.exitCode === null) {
-			// Timeout/limit escalation, NOT a user-controlled stop — hard-stop
-			// without flagging stoppedByControl so background notifications still fire.
-			await this.hardStop();
-		}
 	}
 }

@@ -155,7 +155,7 @@ describe("AgentRegistry — completion policy", () => {
 		assert.equal(registry.lookup("a1"), undefined);
 	});
 
-	it("notifies with status stopped for timeout/hard-stop completions (not user-controlled)", async () => {
+	it("notifies with status stopped for non-user-controlled stopped completions", async () => {
 		const { registry, notified } = makeRegistry();
 		const agent = new FakeAgent("a1");
 		registry.register(agent);

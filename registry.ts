@@ -13,7 +13,7 @@
  *
  * Policy (mirroring the previous inline wiring):
  *   - agent_stop is a deliberate user action → no notification (B6).
- *   - Timeout/hard-stop completions still notify with status "stopped" (B5).
+ *   - Non-user-controlled stopped completions still notify with status "stopped".
  *   - Every terminal path cleans up exactly once (remove is idempotent).
  * Ordering note: the original wiring stopped the child *before* notifying on
  * the spawn-failure path (D15) but *after* notifying on the completion path;
@@ -33,6 +33,8 @@ export interface RegisteredAgent {
 	readonly thinking?: string;
 	/** Resident after completion (idle) — explicit opt-in; complete() keeps it. */
 	readonly persistent?: boolean;
+	/** Runtime residency can also be activated by ask_parent. */
+	readonly shouldStayResident?: boolean;
 	/** Deliver one in-tree message to this agent (AgentProcess.sendMessage). */
 	sendMessage?: (text: string) => Promise<boolean>;
 	stoppedByControl: boolean;
@@ -107,7 +109,7 @@ export class AgentRegistry {
 	 */
 	async complete(agent: RegisteredAgent, completion: AgentCompletion): Promise<void> {
 		const notify = () => (agent.stoppedByControl ? Promise.resolve() : this.notify(agent, completion));
-		if (agent.persistent && completion.status === "completed") {
+		if ((agent.shouldStayResident ?? agent.persistent) && completion.status === "completed") {
 			try {
 				// A failed notification must never kill a resident agent — the
 				// idle row stays (addressable), the agent stays up.

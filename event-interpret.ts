@@ -20,7 +20,7 @@
  */
 
 import type { WidgetResult } from "@everyx/pi-ui/widget.js";
-import type { AgentMessage, RpcEvent } from "./protocol.js";
+import type { AgentMessage, AgentQuestion, RpcEvent } from "./protocol.js";
 
 /**
  * One unit of sub-agent activity — thinking, streamed text, or a tool call.
@@ -41,10 +41,14 @@ export type AgentEvent =
 	| { type: "text_delta"; delta: string }
 	| { type: "agent_failed"; error: string }
 	| { type: "agent_msg"; message: AgentMessage }
+	| { type: "agent_question"; question: AgentQuestion }
 	| { type: "agent_tree"; event: AgentTreeEvent };
 
 /** Status key that carries agent_send messages over extension_ui_request. */
 export const MSG_STATUS_KEY = "pi-subagent-msg";
+
+/** Status key used by ask_parent to yield a structured question to the immediate parent. */
+export const QUESTION_STATUS_KEY = "pi-subagent-question";
 
 /** Status key that carries tree telemetry over extension_ui_request. */
 export const TREE_STATUS_KEY = "pi-subagent-tree";
@@ -145,6 +149,28 @@ export function interpretEvent(raw: RpcEvent): AgentEvent[] {
 		// extension_ui_request verbatim, no throttling). Anything else in the
 		// extension_ui_request namespace is not ours — ignore.
 		if (typeof raw.statusText !== "string") return [];
+		if (raw.method === "setStatus" && raw.statusKey === QUESTION_STATUS_KEY) {
+			try {
+				const parsed = JSON.parse(raw.statusText) as { from?: unknown; question?: unknown; context?: unknown };
+				if (typeof parsed.from === "string" && typeof parsed.question === "string" && parsed.question.trim()) {
+					return [
+						{
+							type: "agent_question" as const,
+							question: {
+								from: parsed.from,
+								question: parsed.question.trim(),
+								...(typeof parsed.context === "string" && parsed.context.trim()
+									? { context: parsed.context.trim() }
+									: {}),
+							},
+						},
+					];
+				}
+			} catch {
+				/* malformed payload — ignore */
+			}
+			return [];
+		}
 		if (raw.method === "setStatus" && raw.statusKey === MSG_STATUS_KEY) {
 			try {
 				const parsed = JSON.parse(raw.statusText) as { to?: unknown; from?: unknown; message?: unknown };

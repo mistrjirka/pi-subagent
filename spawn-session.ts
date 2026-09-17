@@ -29,6 +29,8 @@ export interface SpawnSessionAgent {
 	thinking?: string;
 	startedAt: number;
 	persistent?: boolean;
+	/** True when ask_parent yielded this turn and the child must remain resident for the answer. */
+	awaitingParent?: boolean;
 	status: "queued" | "running" | "completed" | "failed" | "stopped";
 	stoppedByControl: boolean;
 	spawnAndSend(prompt: string): Promise<{ ok: true } | { ok: false; error: string }>;
@@ -122,7 +124,7 @@ export async function runSpawnSession(
 		// Persistent: resident after completion — nothing to tear down; the
 		// caller registers it so agent_send can wake it later. Every other
 		// ending stops the child (idempotent at terminal states).
-		const resident = agent.persistent === true && completion.status === "completed";
+		const resident = (agent.persistent === true || agent.awaitingParent === true) && completion.status === "completed";
 		if (resident) hooks.onResident?.(agent);
 		else await teardown();
 

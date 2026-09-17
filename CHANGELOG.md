@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.0 — profiled fork
+
+- Add Markdown agent profiles with project-over-global overrides and exact `allowed_subagents` delegation.
+- Remove model/thinking/tool/time/budget controls from `agent_spawn`; model/thinking resolve from settings or profiles.
+- Add `ask_parent` with same-context resume through `agent_send`.
+- Remove task-level tool/token/turn/time/concurrency/depth caps.
+- Add direct PiTTy status/steer/stop integration while preserving ordinary Pi sessions.
+
+### Upstream history
+
 ## [1.3.7](https://github.com/everyx/pi-extensions/compare/pi-subagent-v1.3.6...pi-subagent-v1.3.7) (2026-09-11)
 
 

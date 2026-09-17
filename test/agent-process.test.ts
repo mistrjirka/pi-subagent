@@ -91,6 +91,7 @@ class FakeClient {
 	}
 
 	emitEvent(event: {
+		[key: string]: unknown;
 		type: string;
 		assistantMessageEvent?: {
 			type: string;
@@ -171,21 +172,21 @@ describe("AgentProcess — spawnAndSend", () => {
 		assert.equal(agent.status, "failed");
 	});
 
-	it("passes model/tools/sessionDir through and sets --name when label is given", () => {
+	it("passes resolved runtime config and role prompt, never a tool allowlist", () => {
 		const { fake } = makeAgent({
 			cwd: "/tmp",
 			model: "google/gemini-x",
-			tools: ["read", "grep"],
-			label: "explore",
+			appendSystemPrompt: "You are the implementer.",
+			label: "implementer",
 			sessionDir: "/home/u/.pi/agent/subagent-sessions",
 		});
 		assert.deepEqual(fake.args, [
 			"--model",
 			"google/gemini-x",
-			"--tools",
-			"read,grep",
+			"--append-system-prompt",
+			"You are the implementer.",
 			"--name",
-			"explore",
+			"implementer",
 			"--session-dir",
 			"/home/u/.pi/agent/subagent-sessions",
 		]);
@@ -219,45 +220,11 @@ describe("AgentProcess — waitForCompletion", () => {
 		assert.equal(completion.sessionPath, "/tmp/fake.jsonl");
 	});
 
-	it("hard-stops a child that never settles after timeout", async () => {
-		const { agent, fake } = makeAgent({
-			cwd: "/tmp",
-			timeoutMs: 30,
-			abortSettleGraceMs: 20,
-		});
-		await agent.spawnAndSend("do it");
-
-		const completionPromise = agent.waitForCompletion(); // no settle ever arrives
-
-		const completion = await completionPromise;
-		assert.equal(completion.status, "stopped");
-		assert.ok(
-			fake.commands.some((c) => c.type === "abort"),
-			"abort was sent",
-		);
-		assert.equal(fake.endInputCalls, 1, "child was hard-stopped via stdin EOF");
-		assert.equal(agent.stoppedByControl, false, "timeout escalation is not a user-controlled stop");
-	});
-
-	it("does not hard-stop when the child settles within the abort grace window", async () => {
-		const { agent, fake } = makeAgent({ cwd: "/tmp", timeoutMs: 30, abortSettleGraceMs: 500 });
-		await agent.spawnAndSend("do it");
-
-		const completionPromise = agent.waitForCompletion();
-		await new Promise((r) => setTimeout(r, 40)); // deadline passes → abort
-		fake.emitSettled(); // settles inside the grace window
-
-		const completion = await completionPromise;
-		assert.equal(completion.status, "stopped");
-		assert.equal(fake.endInputCalls, 0, "grace settle avoids the hard stop");
-	});
-
-	it("waits forever when no timeoutMs is given (no hidden deadline)", async () => {
+	it("has no hidden task deadline", async () => {
 		const { agent, fake } = makeAgent({ cwd: "/tmp" });
 		await agent.spawnAndSend("do it");
 
-		// No settle, no explicit timeout — the wait must stay pending rather
-		// than escalating to an abort/stop. Probe for a spell, then release.
+		// No settle: the wait stays pending until the child itself settles or is explicitly stopped.
 		let resolved = false;
 		const completionPromise = agent.waitForCompletion().then((c) => {
 			resolved = true;
@@ -616,6 +583,54 @@ describe("AgentProcess — persistent / in-tree messages", () => {
 		fake.emitSettled();
 		assert.deepEqual(outcomes, ["failed"]);
 		assert.equal(agent.status, "failed");
+	});
+
+	it("ask_parent marks the child waiting and preserves it for an answer", async () => {
+		const questions: string[] = [];
+		const { agent, fake } = makeAgent({
+			cwd: "/tmp",
+			onQuestion: (question) => questions.push(question.question),
+		});
+		await agent.spawnAndSend("work");
+		fake.emitEvent({
+			type: "extension_ui_request",
+			method: "setStatus",
+			statusKey: "pi-subagent-question",
+			statusText: JSON.stringify({ from: agent.agentId, question: "Which behavior?" }),
+		});
+		const completionPromise = agent.waitForCompletion();
+		fake.emitSettled();
+		await completionPromise;
+		assert.equal(agent.awaitingParent, true);
+		assert.equal(agent.shouldStayResident, true);
+		assert.equal(agent.pendingQuestion?.question, "Which behavior?");
+		assert.deepEqual(questions, ["Which behavior?"]);
+	});
+
+	it("a successful parent answer resumes the same waiting context", async () => {
+		const idle: string[] = [];
+		const { agent, fake } = makeAgent({
+			cwd: "/tmp",
+			onIdle: (outcome) => idle.push(outcome),
+		});
+		await agent.spawnAndSend("work");
+		fake.emitEvent({
+			type: "extension_ui_request",
+			method: "setStatus",
+			statusKey: "pi-subagent-question",
+			statusText: JSON.stringify({ from: agent.agentId, question: "Need answer" }),
+		});
+		const first = agent.waitForCompletion();
+		fake.emitSettled();
+		await first;
+		assert.equal(agent.awaitingParent, true);
+
+		assert.equal(await agent.sendMessage("Use behavior A."), true);
+		assert.equal(agent.awaitingParent, false);
+		assert.equal(agent.pendingQuestion, undefined);
+		assert.equal(agent.status, "running");
+		fake.emitSettled();
+		assert.deepEqual(idle, ["completed"]);
 	});
 
 	it("in-tree messages from the child fire onMessage", () => {

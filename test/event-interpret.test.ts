@@ -10,7 +10,13 @@
 
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { type AgentEvent, interpretEvent, MSG_STATUS_KEY, TREE_STATUS_KEY } from "../event-interpret.js";
+import {
+	type AgentEvent,
+	interpretEvent,
+	MSG_STATUS_KEY,
+	QUESTION_STATUS_KEY,
+	TREE_STATUS_KEY,
+} from "../event-interpret.js";
 
 function expect(raw: Record<string, unknown>): AgentEvent[] {
 	return interpretEvent({ type: "x", ...raw });
@@ -153,6 +159,32 @@ describe("interpretEvent — agent_end", () => {
 			messages: [{ role: "assistant", content: [], stopReason: "error", errorMessage: "429 Rate limited" }],
 		};
 		assert.deepEqual(interpretEvent(raw), []);
+	});
+});
+
+describe("interpretEvent — ask_parent question channel", () => {
+	it("parses a structured immediate-parent question", () => {
+		assert.deepEqual(
+			interpretEvent({
+				type: "extension_ui_request",
+				method: "setStatus",
+				statusKey: QUESTION_STATUS_KEY,
+				statusText: JSON.stringify({ from: "max", question: "Which behavior?", context: "Tests disagree." }),
+			}),
+			[{ type: "agent_question", question: { from: "max", question: "Which behavior?", context: "Tests disagree." } }],
+		);
+	});
+
+	it("ignores malformed questions", () => {
+		assert.deepEqual(
+			interpretEvent({
+				type: "extension_ui_request",
+				method: "setStatus",
+				statusKey: QUESTION_STATUS_KEY,
+				statusText: "{}",
+			}),
+			[],
+		);
 	});
 });
 

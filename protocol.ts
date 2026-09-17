@@ -78,6 +78,13 @@ type ParsedLine = { kind: "response"; response: RpcResponse } | { kind: "event";
 
 /** One agent_send payload — flows child→parent over the event stream
  * (extension_ui_request) and parent→child as an rpc prompt. */
+export interface AgentQuestion {
+	/** Child asking its immediate spawning agent. */
+	from: string;
+	question: string;
+	context?: string;
+}
+
 export interface AgentMessage {
 	/** Routing target: a direct-child id ("max") or "@parent". */
 	to: string;

@@ -50,7 +50,7 @@ export function notifyCompletion(pi: ExtensionAPI, agent: RegisteredAgent, compl
 		result: completion.output,
 		// Persistent agent completed → resident (idle); a failed follow-up is
 		// reported and cleaned up, so the idle marker must not appear there.
-		idle: agent.persistent && completion.status === "completed" ? true : undefined,
+		idle: (agent.shouldStayResident ?? agent.persistent) && completion.status === "completed" ? true : undefined,
 		usage: {
 			tokens: completion.stats.tokens || null,
 			toolUses: completion.stats.toolUses || null,
@@ -72,7 +72,7 @@ export function notifyCompletion(pi: ExtensionAPI, agent: RegisteredAgent, compl
 				result: truncateForContext(completion.output) + maybeWriteFullOutput(agent.agentId, completion.output),
 				// Only a completed persistent agent stays resident (idle) — a
 				// failed follow-up is cleaned up, so no idle claim.
-				idle: agent.persistent && completion.status === "completed" ? true : undefined,
+				idle: (agent.shouldStayResident ?? agent.persistent) && completion.status === "completed" ? true : undefined,
 				// Resume entry point: sub-agent sessions live outside `pi -r`;
 				// attach with `pi --session <path>`.
 				session_path: completion.sessionPath ?? null,

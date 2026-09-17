@@ -38,7 +38,6 @@ name: implementer
 description: Implements requested code changes and makes sure the affected code builds.
 allowed_subagents:
   - explore
-background: true
 ---
 
 Implement the requested change. Keep scope focused on implementation.
@@ -154,8 +153,7 @@ or centrally in Pi settings under `subagentProfiles`:
     "agents": {
       "implementer": {
         "model": "opencode-go/muse-spark-1.3-contributor",
-        "thinking": "medium",
-        "background": true
+        "thinking": "medium"
       },
       "reviewer": {
         "thinking": "high"
@@ -165,7 +163,7 @@ or centrally in Pi settings under `subagentProfiles`:
 }
 ```
 
-Both `~/.pi/agent/settings.json` and `<project>/.pi/settings.json` are read. Project agent settings override global agent settings. Settings override profile frontmatter for the fields they specify. If neither supplies model/thinking, the child inherits the parent Pi model/thinking level. `background` defaults to `false` and is ignored for nested delegation, which is always foreground.
+Both `~/.pi/agent/settings.json` and `<project>/.pi/settings.json` are read. Project agent settings override global agent settings. Settings override profile frontmatter for the fields they specify. If neither supplies model/thinking, the child inherits the parent Pi model/thinking level.
 
 ## Tools
 
@@ -186,7 +184,7 @@ Parameters:
 - `prompt` — concrete task. The stable role prompt comes from the profile.
 - `label` — optional UI label; defaults to the profile name.
 - `persistent` — keep the same child context resident after completion.
-- `run_in_background` — optional root-only override. If omitted, `background` resolves from agent-specific settings/profile/defaults; nested spawns are always foreground.
+- `run_in_background` — root-only execution choice. `true` detaches and returns an agent id; false/omitted waits in foreground. Nested spawns are always foreground.
 
 Nested agents do not get `run_in_background`; their parent waits for them directly.
 

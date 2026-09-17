@@ -257,7 +257,7 @@ export function buildSpawnParamsSchema(hasParent: boolean): ReturnType<typeof Ty
 					run_in_background: Type.Optional(
 						Type.Boolean({
 							description:
-								"Optional root-only override. true returns immediately; false waits in foreground. Omit to use the profile/settings background default. Nested agents are always foreground.",
+								"Root-only execution choice. true returns immediately; false/omitted waits in foreground. Nested agents are always foreground.",
 						}),
 					),
 				}),
@@ -444,7 +444,7 @@ export default function (pi: ExtensionAPI) {
 				"The profile already contains stable role instructions. Put only the concrete task, relevant paths/evidence, constraints, and desired result in prompt.",
 				"Nested delegation is explicit: a sub-agent can spawn only names listed in its allowed_subagents profile field.",
 				"If a child returns a question, answer that same resident child with agent_send instead of starting a replacement.",
-				"Several independent root foreground calls can run concurrently. Background execution is root-only; omit run_in_background to use the configured background default.",
+				"The root chooses foreground/background per spawn. Several independent root spawns may run concurrently; background execution is root-only.",
 			],
 			parameters: SpawnParamsSchema,
 
@@ -490,9 +490,7 @@ export default function (pi: ExtensionAPI) {
 						isError: true,
 					};
 				}
-				const runInBackground = HAS_PARENT
-					? false
-					: (params.run_in_background ?? runtimeProfile.resolvedBackground ?? false);
+				const runInBackground = HAS_PARENT ? false : params.run_in_background === true;
 				const task = params.prompt?.trim();
 				if (!task) {
 					return {

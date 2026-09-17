@@ -86,12 +86,7 @@ describe("agent profile discovery", () => {
 		);
 		write(
 			path.join(agentDir, "settings.json"),
-			JSON.stringify({
-				subagentProfiles: {
-					defaults: { background: false },
-					agents: { implementer: { model: "global/model", thinking: "medium", background: true } },
-				},
-			}),
+			JSON.stringify({ subagentProfiles: { agents: { implementer: { model: "global/model", thinking: "medium" } } } }),
 		);
 		write(
 			path.join(cwd, ".pi", "settings.json"),
@@ -102,16 +97,6 @@ describe("agent profile discovery", () => {
 		const resolved = resolveAgentProfile(profile, cwd);
 		assert.equal(resolved.resolvedModel, "global/model");
 		assert.equal(resolved.resolvedThinking, "high");
-		assert.equal(resolved.resolvedBackground, true);
-	});
-
-	it("parses a background default from profile frontmatter", () => {
-		const { agentDir, cwd } = fixture();
-		write(path.join(agentDir, "agents", "explore.md"), "---\nname: explore\nbackground: true\n---\n\nExplore.\n");
-		const profile = discoverAgentProfiles(cwd).profiles.get("explore");
-		assert.ok(profile);
-		assert.equal(profile.background, true);
-		assert.equal(resolveAgentProfile(profile, cwd).resolvedBackground, true);
 	});
 
 	it("malformed allowed_subagents does not grant delegation", () => {

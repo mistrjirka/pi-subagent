@@ -11,4 +11,3 @@
 9. Review/acceptance workflow is the root parent's responsibility, not a runtime policy.
 10. External UI integration is a direct status/steer/stop bridge only; it does not become a scheduler or workflow engine.
 11. `agent_wait` blocks on one direct child settlement with no framework timeout; shell sleep/poll loops are unnecessary.
-12. Root foreground/background mode may default from profile/settings via `background`; nested delegation is always foreground.

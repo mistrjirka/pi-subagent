@@ -12,16 +12,12 @@ export interface AgentProfile {
 	allowedSubagents: string[];
 	model?: string;
 	thinking?: string;
-	/** Root-session default only; nested delegation is always foreground. */
-	background?: boolean;
 	sourcePath: string;
 }
 
 interface AgentRuntimeOverride {
 	model?: string;
 	thinking?: string;
-	/** Root-session default only; nested delegation is always foreground. */
-	background?: boolean;
 }
 
 interface SubagentProfileSettings {
@@ -32,7 +28,6 @@ interface SubagentProfileSettings {
 export interface ResolvedAgentProfile extends AgentProfile {
 	resolvedModel?: string;
 	resolvedThinking?: string;
-	resolvedBackground?: boolean;
 }
 
 export interface ProfileCatalog {
@@ -46,10 +41,6 @@ function agentDir(): string {
 
 function stringField(value: unknown): string | undefined {
 	return typeof value === "string" && value.trim() ? value.trim() : undefined;
-}
-
-function booleanField(value: unknown): boolean | undefined {
-	return typeof value === "boolean" ? value : undefined;
 }
 
 function booleanArray(value: unknown): string[] | undefined {
@@ -94,10 +85,6 @@ function parseProfile(filePath: string): AgentProfile {
 	}
 	const model = stringField(frontmatter.model);
 	const thinking = stringField(frontmatter.thinking);
-	const background = booleanField(frontmatter.background);
-	if (frontmatter.background !== undefined && background === undefined) {
-		throw new Error(`${filePath}: background must be true or false`);
-	}
 	if (thinking && !THINKING_LEVELS.has(thinking)) {
 		throw new Error(`${filePath}: invalid thinking level ${JSON.stringify(thinking)}`);
 	}
@@ -108,7 +95,6 @@ function parseProfile(filePath: string): AgentProfile {
 		allowedSubagents,
 		...(model ? { model } : {}),
 		...(thinking ? { thinking } : {}),
-		...(background !== undefined ? { background } : {}),
 		sourcePath: filePath,
 	};
 }
@@ -169,13 +155,10 @@ function runtimeOverride(value: unknown): AgentRuntimeOverride | undefined {
 	const raw = value as Record<string, unknown>;
 	const model = stringField(raw.model);
 	const thinking = stringField(raw.thinking);
-	const background = booleanField(raw.background);
 	if (thinking && !THINKING_LEVELS.has(thinking)) return undefined;
-	if (raw.background !== undefined && background === undefined) return undefined;
 	return {
 		...(model ? { model } : {}),
 		...(thinking ? { thinking } : {}),
-		...(background !== undefined ? { background } : {}),
 	};
 }
 
@@ -226,17 +209,10 @@ export function resolveAgentProfile(profile: AgentProfile, cwd: string): Resolve
 		profile.thinking ??
 		projectSettings.defaults?.thinking ??
 		globalSettings.defaults?.thinking;
-	const resolvedBackground =
-		projectAgent?.background ??
-		globalAgent?.background ??
-		profile.background ??
-		projectSettings.defaults?.background ??
-		globalSettings.defaults?.background;
 	return {
 		...profile,
 		...(resolvedModel ? { resolvedModel } : {}),
 		...(resolvedThinking ? { resolvedThinking } : {}),
-		...(resolvedBackground !== undefined ? { resolvedBackground } : {}),
 	};
 }
 

@@ -16,7 +16,7 @@
  */
 
 import type { AgentTreeEvent } from "./event-interpret.js";
-import { type AgentActivity, interpretEvent } from "./event-interpret.js";
+import { type AgentActivity, type AgentEvent, interpretEvent } from "./event-interpret.js";
 import type { AgentMessage, AgentQuestion, RpcCommand, RpcEvent } from "./protocol.js";
 import { RpcClient, type RpcClientOptions } from "./rpc-client.js";
 import type { RenderEvent } from "./types.js";
@@ -57,6 +57,10 @@ export interface AgentProcessOptions {
 	onDelta?: (delta: string) => void;
 	/** Thinking/tool activity transitions (no text delta involved) — for live tool-card rows. */
 	onActivityChange?: (activity: AgentActivity) => void;
+	/** Raw mapped stream records (thinking/text/tool_start/tool_call) — for the
+	 *  append-only `events.jsonl` tail. Fires for BOTH spawn modes; onEvent is
+	 *  mode-independent. Must never affect the fold below. */
+	onStream?: (event: AgentEvent) => void;
 	/** In-tree message received from this child (extension_ui_request under the reserved key). */
 	onMessage?: (message: AgentMessage) => void;
 	/** Structured ask_parent request from this child. */
@@ -135,6 +139,7 @@ export class AgentProcess {
 		this.onQuestion = options.onQuestion;
 		this.onTreeEvent = options.onTreeEvent;
 		this.onIdle = options.onIdle;
+		this.onStream = options.onStream;
 
 		const args: string[] = [];
 		if (options.model) args.push("--model", options.model);
@@ -346,6 +351,7 @@ export class AgentProcess {
 	private readonly onQuestion: ((question: AgentQuestion) => void) | undefined;
 	private readonly onTreeEvent: ((event: AgentTreeEvent) => void) | undefined;
 	private readonly onIdle: ((outcome: "completed" | "failed") => void) | undefined;
+	private readonly onStream: ((event: AgentEvent) => void) | undefined;
 
 	private onEvent(event: RpcEvent): void {
 		// Raw protocol shapes are interpreted in event-interpret.ts — the only
@@ -374,6 +380,11 @@ export class AgentProcess {
 						this.latestActivity = activity;
 						this.onActivityChange?.(activity);
 					}
+					this.onStream?.(ev);
+					break;
+				case "tool_start":
+					// Stream-only: the fold waits for toolcall_end (authoritative args).
+					this.onStream?.(ev);
 					break;
 				case "tool_call": {
 					// toolcall_end is the authoritative tool call: the wire streams
@@ -384,6 +395,7 @@ export class AgentProcess {
 					this.events.push(ev.activity);
 					this.latestActivity = ev.activity;
 					this.onActivityChange?.(ev.activity);
+					this.onStream?.(ev);
 					break;
 				}
 				case "text_delta": {
@@ -397,6 +409,7 @@ export class AgentProcess {
 					// Widget excerpt reflects the latest streamed text.
 					this.latestActivity = { kind: "text", text: last?.kind === "text" ? last.text : ev.delta };
 					this.onDelta?.(ev.delta);
+					this.onStream?.(ev);
 					break;
 				}
 				case "agent_failed":

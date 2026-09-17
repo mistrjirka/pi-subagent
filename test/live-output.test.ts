@@ -10,7 +10,7 @@
 
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import type { AgentActivity } from "../event-interpret.js";
+import type { AgentActivity, AgentEvent } from "../event-interpret.js";
 import { type CardSink, createLiveChannels, type LiveAgent, type LiveSurfaces } from "../live-output.js";
 
 const agent = (latest?: AgentActivity): LiveAgent => ({
@@ -109,5 +109,41 @@ describe("createLiveChannels — 实时输出落到哪些显示面", () => {
 
 		assert.deepEqual(s.calls, ["widget:a1:none", "tree:a1"]);
 		assert.deepEqual(c.calls, ["card:delta:hi"]);
+	});
+});
+
+describe("createLiveChannels — events.jsonl stream forwarding", () => {
+	it("后台 spawn（没有卡片）：stream 照样送到 events.jsonl —— 卡片缺席正是之前丢流的缺口", () => {
+		const s = surfaces();
+		const streamed: AgentEvent[] = [];
+		const live = createLiveChannels({ surfaces: s.surfaces, stream: (e) => streamed.push(e) });
+
+		const thinking: AgentEvent = { type: "thinking", text: "hmm", contentIndex: 0 };
+		live.onStream(agent({ kind: "thinking", text: "" }), thinking);
+
+		assert.deepEqual(streamed, [thinking]);
+		assert.deepEqual(s.calls, [], "stream 不碰 widget/tree/card，只去文件");
+	});
+
+	it("前台 spawn（卡片开着）：stream 与 card 并存，互不干扰", () => {
+		const s = surfaces();
+		const c = card();
+		const streamed: AgentEvent[] = [];
+		const live = createLiveChannels({ surfaces: s.surfaces, card: c.sink, stream: (e) => streamed.push(e) });
+
+		live.onDelta(agent({ kind: "text", text: "hi" }), "hi");
+		const toolStart: AgentEvent = { type: "tool_start", toolCallId: "call-1", toolName: "bash" };
+		live.onStream(agent({ kind: "tool", name: "bash", args: "" }), toolStart);
+
+		assert.deepEqual(streamed, [toolStart]);
+		assert.deepEqual(c.calls, ["card:delta:hi"]);
+	});
+
+	it("没有 stream（旧调用方）：不炸", () => {
+		const s = surfaces();
+		const live = createLiveChannels({ surfaces: s.surfaces });
+
+		live.onStream(agent(undefined), { type: "thinking", text: "x" });
+		assert.deepEqual(s.calls, []);
 	});
 });

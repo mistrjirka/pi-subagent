@@ -33,12 +33,20 @@ export type AgentActivity =
 	| { kind: "text"; text: string }
 	| { kind: "tool"; name: string; args: string; id?: string };
 
-/** Closed union of interpreted events — the domain vocabulary. */
+/** Closed union of interpreted events — the domain vocabulary.
+ *
+ * The stream fields (`text`/`contentIndex` on thinking and text_delta, plus
+ * `tool_start`) are additive: the in-memory fold in AgentProcess only reads
+ * the pre-existing shapes, while the `events.jsonl` appender reads the new
+ * fields. `RenderEvent`/`AgentActivity` are deliberately unchanged — the card
+ * and widget render markers, and block identity is a file-stream concern.
+ */
 export type AgentEvent =
 	| { type: "settled" }
-	| { type: "thinking" }
-	| { type: "tool_call"; activity: Extract<AgentActivity, { kind: "tool" }> }
-	| { type: "text_delta"; delta: string }
+	| { type: "thinking"; text?: string; contentIndex?: number }
+	| { type: "tool_start"; toolCallId: string; toolName: string; contentIndex?: number }
+	| { type: "tool_call"; activity: Extract<AgentActivity, { kind: "tool" }>; contentIndex?: number }
+	| { type: "text_delta"; delta: string; contentIndex?: number }
 	| { type: "agent_failed"; error: string }
 	| { type: "agent_msg"; message: AgentMessage }
 	| { type: "agent_question"; question: AgentQuestion }
@@ -123,13 +131,34 @@ export function interpretEvent(raw: RpcEvent): AgentEvent[] {
 
 	if (raw.type === "message_update") {
 		const ae = raw.assistantMessageEvent as
-			| { type?: string; delta?: unknown; toolCall?: { name?: unknown; arguments?: unknown; id?: unknown } }
+			| {
+					type?: string;
+					delta?: unknown;
+					contentIndex?: unknown;
+					id?: unknown;
+					toolName?: unknown;
+					toolCall?: { name?: unknown; arguments?: unknown; id?: unknown };
+			  }
 			| undefined;
+		const contentIndex = readContentIndex(ae?.contentIndex);
+		const withIndex = contentIndex !== undefined ? { contentIndex } : {};
 		if (ae?.type === "text_delta" && typeof ae.delta === "string") {
-			return [{ type: "text_delta", delta: ae.delta }];
+			return [{ type: "text_delta", delta: ae.delta, ...withIndex }];
 		}
 		if (ae?.type === "thinking_delta") {
+			// The chunk text used to be discarded (content-less marker). Carry it
+			// additively: the fold ignores `text`, the stream appender needs it.
+			if (typeof ae.delta === "string") {
+				return [{ type: "thinking", text: ae.delta, ...withIndex }];
+			}
 			return [{ type: "thinking" }];
+		}
+		// toolcall_start carries the wire identity (id + toolName, flattened by
+		// pi's toJsonAssistantMessageEvent); arguments stream later and only
+		// toolcall_end is authoritative for args, so the start maps to a
+		// stream-only record with no fold effect.
+		if (ae?.type === "toolcall_start" && typeof ae.id === "string" && typeof ae.toolName === "string") {
+			return [{ type: "tool_start", toolCallId: ae.id, toolName: ae.toolName, ...withIndex }];
 		}
 		if (ae?.type === "toolcall_end" && typeof ae.toolCall?.name === "string") {
 			const activity: Extract<AgentActivity, { kind: "tool" }> = {
@@ -138,8 +167,10 @@ export function interpretEvent(raw: RpcEvent): AgentEvent[] {
 				args: summarizeArgs(ae.toolCall.name, ae.toolCall.arguments),
 			};
 			if (typeof ae.toolCall.id === "string") activity.id = ae.toolCall.id;
-			return [{ type: "tool_call", activity }];
+			return [{ type: "tool_call", activity, ...withIndex }];
 		}
+		// thinking_start/thinking_end/text_start/text_end/toolcall_delta carry no
+		// new chunk (ends repeat cumulative content already streamed) — ignore.
 		return [];
 	}
 
@@ -229,6 +260,11 @@ export function interpretEvent(raw: RpcEvent): AgentEvent[] {
 	}
 
 	return [];
+}
+
+/** Validate the wire block index: non-negative integer only, else absent. */
+function readContentIndex(value: unknown): number | undefined {
+	return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : undefined;
 }
 
 /** Validate an untrusted tree-event payload, op by op. Undefined = malformed. */

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.4 — live child event stream
+
+- Publish `<controlDir>/events.jsonl`, an append-only live tail carrying a running child's thinking chunks, assistant text chunks and tool rows — including for **background** spawns, which previously published no live progress at all because the live card channel only existed for foreground ones.
+- Capture the reasoning chunk text, which event interpretation used to reduce to a content-less marker. It is carried additively on the interpreted event and reaches the stream, while the in-memory card and widget rows stay exactly as they were.
+- Keep the writer bounded: coalesced flushes (on a kind change, every 250 ms, or past ~4 KB), a 2 MB cap that sheds text while tool rows continue, no per-token syscalls and no `fsync`.
+- Additive and backwards compatible: `status.json`, `control/*`, the spawn tool details and the completion notification keep their existing shapes, so a reader that does not know the new file is unaffected.
+
 ## 0.4.3 — self-contained wait supervision
 
 - Make timed `agent_wait` checkpoints return a compact recent activity trail plus up to ~10k characters of recent transcript.

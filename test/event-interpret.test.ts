@@ -39,13 +39,72 @@ describe("interpretEvent — message_update deltas", () => {
 	it("maps thinking_delta to a thinking marker", () => {
 		assert.deepEqual(
 			expect({ type: "message_update", assistantMessageEvent: { type: "thinking_delta", delta: "hmm" } }),
-			[{ type: "thinking" }],
+			[{ type: "thinking", text: "hmm" }],
 		);
+	});
+
+	it("keeps the marker content-less when the delta is missing", () => {
+		assert.deepEqual(expect({ type: "message_update", assistantMessageEvent: { type: "thinking_delta" } }), [
+			{ type: "thinking" },
+		]);
 	});
 
 	it("ignores non-delta assistant message events", () => {
 		assert.deepEqual(expect({ type: "message_update", assistantMessageEvent: { type: "toolcall_start" } }), []);
 		assert.deepEqual(expect({ type: "message_update", assistantMessageEvent: { type: "text_end", content: "x" } }), []);
+	});
+
+	it("carries the wire block index on text and thinking deltas", () => {
+		assert.deepEqual(
+			expect({ type: "message_update", assistantMessageEvent: { type: "text_delta", contentIndex: 2, delta: "hi" } }),
+			[{ type: "text_delta", delta: "hi", contentIndex: 2 }],
+		);
+		assert.deepEqual(
+			expect({
+				type: "message_update",
+				assistantMessageEvent: { type: "thinking_delta", contentIndex: 0, delta: "hmm" },
+			}),
+			[{ type: "thinking", text: "hmm", contentIndex: 0 }],
+		);
+	});
+
+	it("drops a malformed block index instead of inventing one", () => {
+		assert.deepEqual(
+			expect({ type: "message_update", assistantMessageEvent: { type: "text_delta", contentIndex: -1, delta: "x" } }),
+			[{ type: "text_delta", delta: "x" }],
+		);
+		assert.deepEqual(
+			expect({ type: "message_update", assistantMessageEvent: { type: "text_delta", contentIndex: "0", delta: "x" } }),
+			[{ type: "text_delta", delta: "x" }],
+		);
+	});
+
+	it("maps toolcall_start to a stream-only tool_start record", () => {
+		assert.deepEqual(
+			expect({
+				type: "message_update",
+				assistantMessageEvent: { type: "toolcall_start", contentIndex: 1, id: "call-9", toolName: "bash" },
+			}),
+			[{ type: "tool_start", toolCallId: "call-9", toolName: "bash", contentIndex: 1 }],
+		);
+	});
+
+	it("ignores a toolcall_start without wire identity", () => {
+		assert.deepEqual(expect({ type: "message_update", assistantMessageEvent: { type: "toolcall_start" } }), []);
+		assert.deepEqual(
+			expect({ type: "message_update", assistantMessageEvent: { type: "toolcall_start", id: "x" } }),
+			[],
+		);
+	});
+
+	it("ignores start/end/delta markers that carry no new chunk", () => {
+		for (const type of ["thinking_start", "thinking_end", "text_start", "text_end", "toolcall_delta"]) {
+			assert.deepEqual(
+				expect({ type: "message_update", assistantMessageEvent: { type, contentIndex: 0, delta: "dup" } }),
+				[],
+				`${type} maps to nothing`,
+			);
+		}
 	});
 });
 
@@ -73,6 +132,20 @@ describe("interpretEvent — message_update tool calls (v0.84 toolcall_end)", ()
 		};
 		assert.deepEqual(interpretEvent(raw), [
 			{ type: "tool_call", activity: { kind: "tool", name: "Agent", args: '{"prompt":"do it"}' } },
+		]);
+	});
+
+	it("carries the wire block index on tool_call", () => {
+		const raw = {
+			type: "message_update",
+			assistantMessageEvent: {
+				type: "toolcall_end",
+				contentIndex: 3,
+				toolCall: { type: "toolCall", name: "bash", arguments: { command: "ls" }, id: "abc123" },
+			},
+		};
+		assert.deepEqual(interpretEvent(raw), [
+			{ type: "tool_call", activity: { kind: "tool", name: "bash", args: "ls", id: "abc123" }, contentIndex: 3 },
 		]);
 	});
 

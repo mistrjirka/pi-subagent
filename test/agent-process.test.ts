@@ -10,7 +10,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { AgentProcess, type AgentProcessOptions } from "../agent-process.js";
-import type { AgentActivity } from "../event-interpret.js";
+import type { AgentActivity, AgentEvent } from "../event-interpret.js";
 import type { RpcClientOptions } from "../rpc-client.js";
 
 /** Programmable fake standing in for RpcClient. */
@@ -114,6 +114,9 @@ class FakeClient {
 		assistantMessageEvent?: {
 			type: string;
 			delta?: unknown;
+			contentIndex?: unknown;
+			id?: unknown;
+			toolName?: unknown;
 			toolCall?: { id?: unknown; name?: unknown; arguments?: unknown };
 		};
 		messages?: Array<{ role?: string; stopReason?: string; errorMessage?: unknown; content?: unknown[] }>;
@@ -700,5 +703,93 @@ describe("AgentProcess — stop", () => {
 
 		const completion = await completionPromise;
 		assert.equal(completion.status, "stopped");
+	});
+});
+
+describe("AgentProcess — onStream sink (events.jsonl tail)", () => {
+	it("fires for thinking/text/tool_start/tool_call in wire order, fold unchanged", () => {
+		const streamed: AgentEvent[] = [];
+		const deltas: string[] = [];
+		const activities: AgentActivity[] = [];
+		const { agent, fake } = makeAgent({
+			cwd: "/tmp",
+			onStream: (e) => streamed.push(e),
+			onDelta: (d) => deltas.push(d),
+			onActivityChange: (a) => activities.push(a),
+		});
+
+		fake.emitEvent({
+			type: "message_update",
+			assistantMessageEvent: { type: "thinking_delta", contentIndex: 0, delta: "hmm" },
+		});
+		fake.emitEvent({
+			type: "message_update",
+			assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "hi" },
+		});
+		fake.emitEvent({
+			type: "message_update",
+			assistantMessageEvent: { type: "toolcall_start", contentIndex: 1, id: "call-1", toolName: "bash" },
+		});
+		fake.emitEvent({
+			type: "message_update",
+			assistantMessageEvent: {
+				type: "toolcall_end",
+				contentIndex: 1,
+				toolCall: { name: "bash", arguments: { command: "ls" }, id: "call-1" },
+			},
+		});
+
+		assert.deepEqual(streamed, [
+			{ type: "thinking", text: "hmm", contentIndex: 0 },
+			{ type: "text_delta", delta: "hi", contentIndex: 0 },
+			{ type: "tool_start", toolCallId: "call-1", toolName: "bash", contentIndex: 1 },
+			{
+				type: "tool_call",
+				activity: { kind: "tool", name: "bash", args: "ls", id: "call-1" },
+				contentIndex: 1,
+			},
+		]);
+		// The existing fold semantics and ordering are untouched by the sink.
+		assert.deepEqual(
+			agent.getEvents().map((e) => e.kind),
+			["thinking", "text", "tool"],
+		);
+		assert.deepEqual(deltas, ["hi"]);
+		assert.deepEqual(activities, [
+			{ kind: "thinking", text: "" },
+			{ kind: "tool", name: "bash", args: "ls", id: "call-1" },
+		]);
+	});
+
+	it("fires with no card callbacks attached (background-like: sink is mode-independent)", () => {
+		const streamed: AgentEvent[] = [];
+		const { fake } = makeAgent({ cwd: "/tmp", onStream: (e) => streamed.push(e) });
+
+		fake.emitEvent({
+			type: "message_update",
+			assistantMessageEvent: { type: "thinking_delta", contentIndex: 0, delta: "bg thought" },
+		});
+		fake.emitEvent({
+			type: "message_update",
+			assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "bg text" },
+		});
+
+		assert.deepEqual(streamed, [
+			{ type: "thinking", text: "bg thought", contentIndex: 0 },
+			{ type: "text_delta", delta: "bg text", contentIndex: 0 },
+		]);
+	});
+
+	it("forwards the marker-only thinking; starts carry nothing new", () => {
+		const streamed: AgentEvent[] = [];
+		const { fake } = makeAgent({ cwd: "/tmp", onStream: (e) => streamed.push(e) });
+
+		fake.emitEvent({ type: "agent_settled" });
+		fake.emitEvent({ type: "message_update", assistantMessageEvent: { type: "thinking_delta" } });
+		fake.emitEvent({ type: "message_update", assistantMessageEvent: { type: "text_start", contentIndex: 0 } });
+
+		// The marker-only thinking (no text) still reaches the sink so the fold
+		// and the tail observe the same event sequence; starts carry nothing.
+		assert.deepEqual(streamed, [{ type: "thinking" }]);
 	});
 });

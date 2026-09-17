@@ -674,6 +674,10 @@ export default function (pi: ExtensionAPI) {
 					// getWidget, not widget: the widget is created on first use, so a
 					// captured reference would be null for every update before that.
 					surfaces: { getWidget: () => widget ?? undefined, tree },
+					// Live tail for external readers (PiTTy): attached for BOTH spawn
+					// modes — unlike `card` below, which exists only for foreground.
+					// `control` is assigned below before any event can flow.
+					stream: (event) => control.appendEvents(event),
 					...(runInBackground
 						? {}
 						: {
@@ -756,9 +760,11 @@ export default function (pi: ExtensionAPI) {
 					// Where live output goes lives in live-output.ts: the widget row and
 					// the tree fold hear about every update (a woken resident agent has a
 					// row and no card), and the card below exists only for a foreground
-					// spawn while its tool call runs.
+					// spawn while its tool call runs. The events.jsonl tail additionally
+					// hears about every mapped record in BOTH modes via onStream.
 					onDelta: (delta) => live.onDelta(agent, delta),
 					onActivityChange: (activity) => live.onActivity(agent, activity),
+					onStream: (event) => live.onStream(agent, event),
 				});
 				const control = new ExternalControlBridge(
 					agent,

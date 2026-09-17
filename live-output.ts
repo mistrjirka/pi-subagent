@@ -16,7 +16,7 @@
  * module exists to prevent.
  */
 
-import type { AgentActivity } from "./event-interpret.js";
+import type { AgentActivity, AgentEvent } from "./event-interpret.js";
 
 export interface LiveAgent {
 	agentId: string;
@@ -43,9 +43,16 @@ export interface CardSink {
 export interface LiveChannels {
 	onDelta(agent: LiveAgent, delta: string): void;
 	onActivity(agent: LiveAgent, activity: AgentActivity): void;
+	/** Mapped stream record → the `events.jsonl` appender. Never gated on spawn mode. */
+	onStream(agent: LiveAgent, event: AgentEvent): void;
 }
 
-export function createLiveChannels(opts: { surfaces: LiveSurfaces; card?: CardSink }): LiveChannels {
+export function createLiveChannels(opts: {
+	surfaces: LiveSurfaces;
+	card?: CardSink;
+	/** Stream sink: attached for foreground AND background spawns alike. */
+	stream?: (event: AgentEvent) => void;
+}): LiveChannels {
 	/** Both surfaces, every update, whatever the spawn looked like. */
 	const publish = (agent: LiveAgent, activity: AgentActivity | undefined): void => {
 		opts.surfaces.getWidget?.()?.updateActivity(agent.agentId, activity);
@@ -61,6 +68,11 @@ export function createLiveChannels(opts: { surfaces: LiveSurfaces; card?: CardSi
 			publish(agent, activity);
 			// Text arrives through onDelta — the card does not need it twice.
 			if (activity.kind !== "text") opts.card?.activity(activity);
+		},
+		onStream(_agent, event) {
+			// The card sink's absence for background is exactly the gap this
+			// closes: the stream leaves the hosting process either way.
+			opts.stream?.(event);
 		},
 	};
 }

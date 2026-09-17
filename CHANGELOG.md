@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.0 — explicit wait and execution defaults
+
+- Add `agent_wait` for blocking on a direct background/resumed child without a framework timeout.
+- Add `background` profile/settings defaults for root spawns; nested delegation remains foreground.
+- Suppress duplicate completion notifications when an active `agent_wait` consumes the settlement.
+- Keep explicit stop/cancel behavior deterministic and remove any need for shell sleep/poll loops.
+
 ## 0.1.1 — symlink profile discovery
 
 - Discover Markdown profiles installed as symlinks, including the wiki `just link pi` layout.

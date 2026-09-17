@@ -243,6 +243,78 @@ describe("AgentRegistry — persistent (idle) completion", () => {
 	});
 });
 
+describe("AgentRegistry — explicit wait", () => {
+	it("blocks until a running child settles", async () => {
+		const { registry } = makeRegistry(null);
+		const agent = new FakeAgent("a1");
+		registry.register(agent);
+		const waiting = registry.waitForSettlement("a1");
+		registry.recordSettlement("a1", { completion: completion({ output: "ready" }) });
+		assert.equal((await waiting)?.completion.output, "ready");
+	});
+
+	it("returns a cached settlement when wait starts after completion", async () => {
+		const { registry } = makeRegistry(null);
+		const agent = new FakeAgent("a1");
+		registry.register(agent);
+		registry.recordSettlement("a1", { completion: completion({ output: "already done" }) });
+		assert.equal((await registry.waitForSettlement("a1"))?.completion.output, "already done");
+	});
+
+	it("returns undefined immediately for an unknown child", async () => {
+		const { registry } = makeRegistry(null);
+		assert.equal(await registry.waitForSettlement("missing"), undefined);
+	});
+
+	it("an active waiter suppresses the normal completion notification", async () => {
+		const { registry, notified } = makeRegistry(null);
+		const agent = new FakeAgent("a1");
+		registry.register(agent);
+		const waiting = registry.waitForSettlement("a1");
+		await registry.complete(agent, completion({ output: "waited" }));
+		assert.equal((await waiting)?.completion.output, "waited");
+		assert.deepEqual(notified, []);
+	});
+
+	it("agent_stop wakes an active waiter with a stopped settlement", async () => {
+		const { registry } = makeRegistry(null);
+		const agent = new FakeAgent("a1");
+		registry.register(agent);
+		const waiting = registry.waitForSettlement("a1");
+		assert.equal(await registry.stopAndRemove("a1"), true);
+		assert.equal((await waiting)?.completion.status, "stopped");
+	});
+
+	it("cancelling a wait does not stop or remove the child", async () => {
+		const { registry } = makeRegistry(null);
+		const agent = new FakeAgent("a1");
+		registry.register(agent);
+		const controller = new AbortController();
+		const waiting = registry.waitForSettlement("a1", controller.signal);
+		controller.abort();
+		await assert.rejects(waiting, /agent_wait cancelled/);
+		assert.equal(registry.lookup("a1"), agent);
+		assert.equal(agent.stopCalls, 0);
+	});
+
+	it("clears the old settlement when agent_send starts a new turn", async () => {
+		const { registry } = makeRegistry(null);
+		const agent = new FakeAgent("a1", "stay", true);
+		registry.register(agent);
+		registry.recordSettlement("a1", { completion: completion({ output: "old" }) });
+		assert.equal(await registry.deliver("a1", "continue"), true);
+		const waiting = registry.waitForSettlement("a1");
+		let resolved = false;
+		void waiting.then(() => {
+			resolved = true;
+		});
+		await Promise.resolve();
+		assert.equal(resolved, false);
+		registry.recordSettlement("a1", { completion: completion({ output: "new" }) });
+		assert.equal((await waiting)?.completion.output, "new");
+	});
+});
+
 describe("AgentRegistry — in-tree routing", () => {
 	const msg = (to: string, from = "a1"): AgentMessage => ({ to, from, message: "hi" });
 

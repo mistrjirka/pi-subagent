@@ -13,6 +13,7 @@ The runtime deliberately does very little orchestration. The **parent Pi decides
 - **All normal Pi tools.** The runtime does not impose per-agent tool allowlists.
 - **Explicit delegation.** A child may spawn only exact agent names listed in its profile's `allowed_subagents`. Omitted means none.
 - **Persistent workers.** A child can stay resident after finishing and be continued with `agent_send` in the same context.
+- **Explicit wait.** `agent_wait` blocks on a direct background/resumed child with no framework timeout; no shell sleep/poll loop is needed.
 - **Clarification path.** `ask_parent` lets a child yield when material information is missing; its immediate parent answers the same resident context with `agent_send`.
 - **PiTTy bridge.** Spawn details expose a small direct-control directory for live inspection, steer, and stop. This does not emulate the old `pi-subagents` workflow runtime.
 
@@ -37,6 +38,7 @@ name: implementer
 description: Implements requested code changes and makes sure the affected code builds.
 allowed_subagents:
   - explore
+background: true
 ---
 
 Implement the requested change. Keep scope focused on implementation.
@@ -152,7 +154,8 @@ or centrally in Pi settings under `subagentProfiles`:
     "agents": {
       "implementer": {
         "model": "opencode-go/muse-spark-1.3-contributor",
-        "thinking": "medium"
+        "thinking": "medium",
+        "background": true
       },
       "reviewer": {
         "thinking": "high"
@@ -162,7 +165,7 @@ or centrally in Pi settings under `subagentProfiles`:
 }
 ```
 
-Both `~/.pi/agent/settings.json` and `<project>/.pi/settings.json` are read. Project agent settings override global agent settings. Settings override profile frontmatter for the fields they specify. If neither supplies a value, the child inherits the parent Pi model/thinking level.
+Both `~/.pi/agent/settings.json` and `<project>/.pi/settings.json` are read. Project agent settings override global agent settings. Settings override profile frontmatter for the fields they specify. If neither supplies model/thinking, the child inherits the parent Pi model/thinking level. `background` defaults to `false` and is ignored for nested delegation, which is always foreground.
 
 ## Tools
 
@@ -183,9 +186,19 @@ Parameters:
 - `prompt` — concrete task. The stable role prompt comes from the profile.
 - `label` — optional UI label; defaults to the profile name.
 - `persistent` — keep the same child context resident after completion.
-- `run_in_background` — root-only; return immediately and notify on completion.
+- `run_in_background` — optional root-only override. If omitted, `background` resolves from agent-specific settings/profile/defaults; nested spawns are always foreground.
 
 Nested agents do not get `run_in_background`; their parent waits for them directly.
+
+### `agent_wait`
+
+Wait for a direct child that is running in the background or has been resumed with `agent_send`:
+
+```json
+{ "agent_id": "@max" }
+```
+
+There is no framework timeout. The call returns when that child completes/fails/stops, or when it reaches `ask_parent`. If the child already settled, the cached settlement is returned immediately. Use this instead of shell `sleep`/poll loops.
 
 ### `agent_send`
 

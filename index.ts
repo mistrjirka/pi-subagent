@@ -2,7 +2,7 @@
  * pi-subagent — spawn isolated sub‑agent pi instances + in-tree messaging.
  *
  * Architecture:
- *   index.ts          — tool registration (agent_spawn / agent_stop / agent_send) + routing glue
+ *   index.ts          — tool registration (agent_spawn / agent_wait / agent_stop / agent_send) + routing glue
  *   protocol.ts       — pure JSONL protocol layer + in-tree routing (tested)
  *   rpc-client.ts     — stateful thin JSONL client (spawn + transport)
  *   event-interpret.ts— raw RpcEvent → AgentEvent adapter (pure, tested)
@@ -53,7 +53,7 @@ import {
 	resolveAgentProfile,
 } from "./profiles.js";
 import { type AgentMessage, type AgentQuestion, formatFrom } from "./protocol.js";
-import { AgentRegistry, type WidgetSurface } from "./registry.js";
+import { AgentRegistry, type AgentSettlement, type WidgetSurface } from "./registry.js";
 import { renderNotification } from "./render.js";
 import { runSpawnSession, type SpawnOutcome } from "./spawn-session.js";
 import { createSubtreeDisplay } from "./tree-display.js";
@@ -199,6 +199,11 @@ interface SpawnParams {
 	persistent?: boolean;
 }
 
+/** agent_wait tool params. */
+interface WaitParams {
+	agent_id: string;
+}
+
 /** agent_stop tool params. */
 interface StopParams {
 	agent_id: string;
@@ -252,7 +257,7 @@ export function buildSpawnParamsSchema(hasParent: boolean): ReturnType<typeof Ty
 					run_in_background: Type.Optional(
 						Type.Boolean({
 							description:
-								"If true, return immediately and deliver completion later. Root-only; nested agents use foreground delegation.",
+								"Optional root-only override. true returns immediately; false waits in foreground. Omit to use the profile/settings background default. Nested agents are always foreground.",
 						}),
 					),
 				}),
@@ -260,6 +265,10 @@ export function buildSpawnParamsSchema(hasParent: boolean): ReturnType<typeof Ty
 }
 
 const SpawnParamsSchema = buildSpawnParamsSchema(HAS_PARENT);
+
+const WaitParamsSchema = Type.Object({
+	agent_id: Type.String({ description: 'The direct child id to wait for (e.g. "@max").' }),
+});
 
 const StopParamsSchema = Type.Object({
 	agent_id: Type.String({ description: 'The agent id to stop (e.g. "@max").' }),
@@ -435,7 +444,7 @@ export default function (pi: ExtensionAPI) {
 				"The profile already contains stable role instructions. Put only the concrete task, relevant paths/evidence, constraints, and desired result in prompt.",
 				"Nested delegation is explicit: a sub-agent can spawn only names listed in its allowed_subagents profile field.",
 				"If a child returns a question, answer that same resident child with agent_send instead of starting a replacement.",
-				"Several independent root foreground calls can run concurrently. Background execution is root-only.",
+				"Several independent root foreground calls can run concurrently. Background execution is root-only; omit run_in_background to use the configured background default.",
 			],
 			parameters: SpawnParamsSchema,
 
@@ -481,6 +490,9 @@ export default function (pi: ExtensionAPI) {
 						isError: true,
 					};
 				}
+				const runInBackground = HAS_PARENT
+					? false
+					: (params.run_in_background ?? runtimeProfile.resolvedBackground ?? false);
 				const task = params.prompt?.trim();
 				if (!task) {
 					return {
@@ -496,7 +508,7 @@ export default function (pi: ExtensionAPI) {
 					// <reason>` (the id never exists yet — spawn didn't happen).
 					return {
 						content: [{ type: "text", text: resolved.error }],
-						details: params.run_in_background
+						details: runInBackground
 							? { runInBackground: true, label, error: resolved.error }
 							: { error: resolved.error },
 						isError: true,
@@ -515,7 +527,7 @@ export default function (pi: ExtensionAPI) {
 				// surface on the root widget. One module owns the whole decision.
 				const subtree = createSubtreeDisplay({
 					hasParent: HAS_PARENT,
-					foregroundEdge: params.run_in_background !== true,
+					foregroundEdge: !runInBackground,
 					getWidget: () => {
 						ensureWidget(ctx);
 						return widget ?? undefined;
@@ -565,11 +577,9 @@ export default function (pi: ExtensionAPI) {
 						{ deliverAs: "followUp", triggerTurn: true },
 					);
 				};
-				// Wake-turn ending → completion notification. The assembly is
-				// identical for both endings except status/output-default.
-				const notifyWake = async (status: "completed" | "failed"): Promise<void> => {
+				const wakeCompletion = async (status: "completed" | "failed") => {
 					const [output, stats] = await Promise.all([agent.lastOutput(), agent.getStats()]);
-					notifyCompletion(pi, agent, {
+					return {
 						status,
 						output: output || (status === "failed" ? "Follow-up turn failed (model API error)." : output),
 						stats: {
@@ -579,13 +589,18 @@ export default function (pi: ExtensionAPI) {
 						},
 						sessionPath: agent.sessionPath,
 						sessionId: agent.sessionId,
-					});
+					} as const;
+				};
+				const settleWake = async (status: "completed" | "failed"): Promise<void> => {
+					const completion = await wakeCompletion(status);
+					const waited = registry.recordSettlement(agentId, { completion });
+					if (!waited && !agent.stoppedByControl) notifyCompletion(pi, agent, completion);
 				};
 				const live = createLiveChannels({
 					// getWidget, not widget: the widget is created on first use, so a
 					// captured reference would be null for every update before that.
 					surfaces: { getWidget: () => widget ?? undefined, tree },
-					...(params.run_in_background
+					...(runInBackground
 						? {}
 						: {
 								card: {
@@ -637,11 +652,20 @@ export default function (pi: ExtensionAPI) {
 						if (outcome === "completed") {
 							if (agent.awaitingParent && agent.pendingQuestion) {
 								pendingQuestion = agent.pendingQuestion;
-								notifyQuestion(agent.pendingQuestion);
-								registry.markIdle(agentId);
+								void wakeCompletion("completed")
+									.then((completion) => {
+										const waited = registry.recordSettlement(agentId, {
+											completion,
+											waitingForParent: true,
+											question: agent.pendingQuestion,
+										});
+										if (!waited && agent.pendingQuestion) notifyQuestion(agent.pendingQuestion);
+										registry.markIdle(agentId);
+									})
+									.catch(() => {});
 								return;
 							}
-							if (!agent.stoppedByControl) void notifyWake("completed").catch(() => {});
+							void settleWake("completed").catch(() => {});
 							if (agent.persistent) {
 								registry.markIdle(agentId);
 							} else {
@@ -650,7 +674,7 @@ export default function (pi: ExtensionAPI) {
 							}
 							return;
 						}
-						void notifyWake("failed")
+						void settleWake("failed")
 							.then(() => tree.remove(agentId, "failed"))
 							.then(() => registry.stopAndRemove(agentId))
 							.catch(() => {});
@@ -693,7 +717,7 @@ export default function (pi: ExtensionAPI) {
 				try {
 					outcome = await runSpawnSession(agent, {
 						task,
-						runInBackground: params.run_in_background === true,
+						runInBackground,
 						signal,
 						hooks: {
 							onWorking: () =>
@@ -718,7 +742,12 @@ export default function (pi: ExtensionAPI) {
 										const child = a as AgentProcess;
 										if (completion.status === "completed" && child.awaitingParent && child.pendingQuestion) {
 											pendingQuestion = child.pendingQuestion;
-											notifyQuestion(child.pendingQuestion);
+											const waited = registry.recordSettlement(child.agentId, {
+												completion,
+												waitingForParent: true,
+												question: child.pendingQuestion,
+											});
+											if (!waited) notifyQuestion(child.pendingQuestion);
 											registry.markIdle(child.agentId);
 											return;
 										}
@@ -768,7 +797,7 @@ export default function (pi: ExtensionAPI) {
 						// The isError return carries the failure to the LLM and the status
 						// line shows it to the user — no follow-up notification on top.
 						return spawnErrorResult(outcome, {
-							runInBackground: params.run_in_background,
+							runInBackground,
 							label: agent.label,
 						});
 
@@ -926,6 +955,70 @@ export default function (pi: ExtensionAPI) {
 			...spawnView,
 		});
 	}
+
+	// ── agent_wait ───────────────────────────────────────
+	pi.registerTool({
+		name: "agent_wait",
+		label: "Wait for Agent",
+		description:
+			"Block until a direct child settles, fails/stops, or asks its parent a question. There is no framework timeout. If the child already settled, return the cached settlement immediately.",
+		promptSnippet: "Wait for a background or resumed child to settle",
+		promptGuidelines: [
+			"Use agent_wait when a background child's result becomes the next dependency instead of polling shell/status output.",
+			"agent_wait has no framework deadline. A long-running child keeps the call blocked until it settles, is stopped, or asks for parent input.",
+			"If agent_wait returns an ask_parent question, answer that same child with agent_send; call agent_wait again only after the answer when you need the resumed result.",
+		],
+		parameters: WaitParamsSchema,
+
+		async execute(_toolCallId, raw, signal, onUpdate, ctx) {
+			captureUi(ctx);
+			const params = raw as WaitParams;
+			const rawId = params.agent_id?.trim();
+			const agentId = rawId?.replace(/^@/, "");
+			if (!agentId) return toErrorResult("`agent_id` is required.");
+			onUpdate?.({ content: [{ type: "text", text: `Waiting for ${atId(agentId)}…` }], details: { agentId } });
+			let settlement: AgentSettlement | undefined;
+			try {
+				settlement = await registry.waitForSettlement(agentId, signal);
+			} catch (error) {
+				return toErrorResult(error);
+			}
+			if (!settlement) return toErrorResult(`Unknown or no-longer-waitable direct child ${atId(agentId)}.`);
+			const completion = settlement.completion;
+			if (settlement.waitingForParent && settlement.question) {
+				const contextLine = settlement.question.context ? `\nContext: ${settlement.question.context}` : "";
+				return {
+					content: [
+						{
+							type: "text",
+							text: `Agent ${atId(agentId)} is waiting for your answer:\n${settlement.question.question}${contextLine}\n\nReply with agent_send; its context is preserved.`,
+						},
+					],
+					details: {
+						agentId,
+						state: "waiting",
+						waitingForParent: true,
+						question: settlement.question.question,
+						context: settlement.question.context,
+						sessionPath: completion.sessionPath,
+						sessionId: completion.sessionId,
+					},
+				};
+			}
+			const output = truncateForContext(completion.output) + maybeWriteFullOutput(agentId, completion.output);
+			return {
+				content: [{ type: "text", text: output || `Agent ${atId(agentId)} ${completion.status}.` }],
+				details: {
+					agentId,
+					state: completion.status,
+					sessionPath: completion.sessionPath,
+					sessionId: completion.sessionId,
+					endedAt: Date.now(),
+				},
+				...(completion.status === "completed" ? {} : { isError: true }),
+			};
+		},
+	});
 
 	// ── agent_stop ───────────────────────────────────────
 	pi.registerTool({

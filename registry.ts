@@ -23,7 +23,7 @@
 import type { WidgetResult } from "@everyx/pi-ui/widget.js";
 import type { AgentCompletion } from "./agent-process.js";
 import { randomAgentName } from "./name-gen.js";
-import { type AgentMessage, type RouteDecision, routeMessage } from "./protocol.js";
+import { type AgentMessage, type AgentQuestion, type RouteDecision, routeMessage } from "./protocol.js";
 
 /** Narrow agent surface the registry needs — AgentProcess satisfies it. */
 export interface RegisteredAgent {
@@ -39,6 +39,12 @@ export interface RegisteredAgent {
 	sendMessage?: (text: string) => Promise<boolean>;
 	stoppedByControl: boolean;
 	stop(): Promise<void>;
+}
+
+export interface AgentSettlement {
+	completion: AgentCompletion;
+	waitingForParent?: boolean;
+	question?: AgentQuestion;
 }
 
 /** Narrow widget surface — index.ts adapts the TUI AgentWidget to it. */
@@ -68,6 +74,9 @@ export class AgentRegistry {
 	private readonly notify: AgentRegistryDeps["notify"];
 	private readonly getWidget: NonNullable<AgentRegistryDeps["getWidget"]>;
 	private readonly hasParent: boolean;
+	/** Latest settled turn for each id; retained so agent_wait can arrive after the notification. */
+	private readonly settlements = new Map<string, AgentSettlement>();
+	private readonly settlementWaiters = new Map<string, Set<(settlement: AgentSettlement | undefined) => void>>();
 	/** Names handed out this session — re-roll on collision (pool ~200). */
 	private readonly usedNames = new Set<string>();
 
@@ -91,12 +100,51 @@ export class AgentRegistry {
 
 	/** Track a background agent: registry entry + widget row. */
 	register(agent: RegisteredAgent, status: "running" | "idle" = "running"): void {
+		this.settlements.delete(agent.agentId);
 		this.agents.set(agent.agentId, agent);
 		this.getWidget()?.add(agent, status);
 	}
 
 	lookup(agentId: string): RegisteredAgent | undefined {
 		return this.agents.get(agentId);
+	}
+
+	/** Record a child turn settling and wake any explicit agent_wait callers. Returns true when a waiter consumed it live. */
+	recordSettlement(agentId: string, settlement: AgentSettlement): boolean {
+		this.settlements.set(agentId, settlement);
+		const waiters = this.settlementWaiters.get(agentId);
+		if (!waiters?.size) return false;
+		this.settlementWaiters.delete(agentId);
+		for (const resolve of waiters) resolve(settlement);
+		return true;
+	}
+
+	/** Block without a framework timeout until this direct child settles. */
+	async waitForSettlement(agentId: string, signal?: AbortSignal): Promise<AgentSettlement | undefined> {
+		const cached = this.settlements.get(agentId);
+		if (cached) return cached;
+		if (!this.agents.has(agentId)) return undefined;
+		if (signal?.aborted) throw new Error("agent_wait cancelled");
+		return await new Promise<AgentSettlement | undefined>((resolve, reject) => {
+			const waiters = this.settlementWaiters.get(agentId) ?? new Set();
+			const finish = (settlement: AgentSettlement | undefined) => {
+				signal?.removeEventListener("abort", onAbort);
+				resolve(settlement);
+			};
+			const onAbort = () => {
+				waiters.delete(finish);
+				if (waiters.size === 0) this.settlementWaiters.delete(agentId);
+				reject(new Error("agent_wait cancelled"));
+			};
+			waiters.add(finish);
+			this.settlementWaiters.set(agentId, waiters);
+			signal?.addEventListener("abort", onAbort, { once: true });
+		});
+	}
+
+	/** A successful steer/answer starts a new turn, so future waits must observe the next settlement. */
+	clearSettlement(agentId: string): void {
+		this.settlements.delete(agentId);
 	}
 
 	/**
@@ -108,7 +156,8 @@ export class AgentRegistry {
 	 * removes it later.
 	 */
 	async complete(agent: RegisteredAgent, completion: AgentCompletion): Promise<void> {
-		const notify = () => (agent.stoppedByControl ? Promise.resolve() : this.notify(agent, completion));
+		const waited = this.recordSettlement(agent.agentId, { completion });
+		const notify = () => (agent.stoppedByControl || waited ? Promise.resolve() : this.notify(agent, completion));
 		if ((agent.shouldStayResident ?? agent.persistent) && completion.status === "completed") {
 			try {
 				// A failed notification must never kill a resident agent — the
@@ -143,6 +192,7 @@ export class AgentRegistry {
 		const agent = this.agents.get(target);
 		if (!agent?.sendMessage) return false;
 		const ok = await agent.sendMessage(text);
+		if (ok) this.clearSettlement(target);
 		// A delivered message woke an idle persistent agent — the widget row
 		// flips back to running (spinner resumes). Harmless for running rows.
 		if (ok) this.getWidget()?.setStatus?.(target, "running");
@@ -163,12 +213,21 @@ export class AgentRegistry {
 		const agent = this.agents.get(agentId);
 		if (!agent) return false;
 		await agent.stop();
+		this.recordSettlement(agentId, {
+			completion: {
+				status: "stopped",
+				output: "Agent stopped.",
+				stats: { tokens: 0, toolUses: 0, durationMs: 0 },
+			},
+		});
 		this.remove(agentId, "stopped");
 		return true;
 	}
 
 	/** Stop everything (session shutdown). */
 	async shutdown(): Promise<void> {
+		for (const waiters of this.settlementWaiters.values()) for (const resolve of waiters) resolve(undefined);
+		this.settlementWaiters.clear();
 		for (const agent of this.agents.values()) {
 			void agent.stop();
 		}

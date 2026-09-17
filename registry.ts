@@ -51,6 +51,9 @@ export interface RegisteredAgent {
 	sendMessage?: (text: string) => Promise<boolean>;
 	stoppedByControl: boolean;
 	stop(): Promise<void>;
+	/** Record an explicit user stop as terminal (AgentProcess.markStopped):
+	 *  idempotent, flags the stop as user-controlled, never overwrites failed. */
+	markStopped(): void;
 }
 
 export interface AgentSettlement {
@@ -360,6 +363,12 @@ export class AgentRegistry {
 		const agent = this.agents.get(agentId);
 		if (!agent) return false;
 		await agent.stop();
+		// An already-settled resident agent (completed/idle) is untouched by
+		// stop()'s early return, which would leave the control bridge
+		// heartbeating idle forever — record the explicit stop as terminal so
+		// the bridge's existing terminal check winds it down. Never applied
+		// on the normal completion path (complete() must keep completed/failed).
+		agent.markStopped();
 		this.recordSettlement(agentId, {
 			completion: {
 				status: "stopped",

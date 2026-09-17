@@ -39,13 +39,26 @@ class FakeAgent implements RegisteredAgent {
 		return this.sendOk;
 	}
 
+	/** Mirrors AgentProcess: done when waitForCompletion settled the agent. */
+	done = false;
+
 	async stop(): Promise<void> {
 		this.stopCalls++;
+		// AgentProcess.stop() semantics: an already-settled agent keeps its
+		// reported status (the early return only ensures the child is gone);
+		// any live stop flags the agent as user-controlled — later
+		// completions must not notify.
+		if (this.done) return;
 		this.stopped = true;
 		this.status = "stopped";
-		// AgentProcess.stop() semantics: any stop flags the agent as
-		// user-controlled — later completions must not notify.
 		this.stoppedByControl = true;
+	}
+
+	/** Mirrors AgentProcess.markStopped exactly (explicit-stop terminal marker). */
+	markStopped(): void {
+		this.stoppedByControl = true;
+		if (this.status === "stopped" || this.status === "failed") return;
+		this.status = "stopped";
 	}
 }
 
@@ -522,5 +535,74 @@ describe("AgentRegistry — stop / shutdown", () => {
 		assert.equal(registry.lookup("a1"), undefined);
 		assert.equal(registry.lookup("a2"), undefined);
 		assert.equal(widget?.disposed, true);
+	});
+});
+
+describe("AgentRegistry — explicit stop is terminal for the control bridge", () => {
+	it("stopAndRemove marks a settled persistent agent stopped (was: idle forever)", async () => {
+		const { registry } = makeRegistry();
+		// A persistent agent that completed: waitForCompletion settled it, so
+		// stop()'s early return leaves the reported status at completed
+		// (the bridge maps that to idle and never winds down).
+		const agent = new FakeAgent("a1", "stay", true);
+		agent.done = true;
+		agent.status = "completed";
+		registry.register(agent);
+
+		assert.equal(await registry.stopAndRemove("a1"), true);
+		assert.equal(agent.stopCalls, 1);
+		assert.equal(agent.status, "stopped", "explicit stop is terminal for the bridge");
+		assert.equal(registry.lookup("a1"), undefined);
+	});
+
+	it("complete() never relabels a normal completion as stopped", async () => {
+		const { registry, notified } = makeRegistry();
+		const agent = new FakeAgent("a1");
+		agent.done = true;
+		agent.status = "completed";
+		registry.register(agent);
+
+		await registry.complete(agent, completion({ status: "completed" }));
+
+		assert.deepEqual(notified, [{ agentId: "a1", status: "completed" }]);
+		assert.equal(agent.status, "completed", "normal path keeps completed (no markStopped)");
+	});
+
+	it("complete() never relabels a failure as stopped", async () => {
+		const { registry, notified } = makeRegistry();
+		const agent = new FakeAgent("a1");
+		agent.done = true;
+		agent.status = "failed";
+		registry.register(agent);
+
+		await registry.complete(agent, completion({ status: "failed" }));
+
+		assert.deepEqual(notified, [{ agentId: "a1", status: "failed" }]);
+		assert.equal(agent.status, "failed");
+	});
+
+	it("double stop is idempotent (second stop reports false, state unchanged)", async () => {
+		const { registry } = makeRegistry();
+		const agent = new FakeAgent("a1", "stay", true);
+		agent.done = true;
+		agent.status = "completed";
+		registry.register(agent);
+
+		assert.equal(await registry.stopAndRemove("a1"), true);
+		assert.equal(agent.status, "stopped");
+		assert.equal(await registry.stopAndRemove("a1"), false, "already removed");
+		assert.equal(agent.stopCalls, 1, "no second stop");
+		assert.equal(agent.status, "stopped");
+	});
+
+	it("markStopped never overwrites an already-terminal failed", async () => {
+		const { registry } = makeRegistry();
+		const agent = new FakeAgent("a1");
+		agent.done = true;
+		agent.status = "failed";
+		registry.register(agent);
+
+		assert.equal(await registry.stopAndRemove("a1"), true);
+		assert.equal(agent.status, "failed", "failed stays failed (already terminal)");
 	});
 });

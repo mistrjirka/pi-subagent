@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.5 — stopped agents stop reporting
+
+- Stop leaking a live status heartbeat when a resident agent is stopped. `agent_stop` on a persistent agent that had already completed left that agent's control bridge running, so `status.json` kept reporting `idle` with a fresh `updatedAt` for the entire life of the hosting Pi process — a dead child looked permanently live to any external reader, and the bridge kept a 200 ms timer plus two status writes per tick alive with it.
+- Record an explicit stop as a terminal state: `AgentProcess.markStopped()` flags the stop as user-controlled and sets the reported status to `stopped` (idempotent, never overwrites `failed`), and `AgentRegistry.stopAndRemove()` applies it. The control bridge's existing terminal check then clears the timer, flushes the event stream and writes the final `stopped` status.
+- The normal completion path is deliberately untouched: a child that completes or fails still reports `completed`/`failed` with its bridge wound down, and a resident agent that is merely left idle still heartbeats `idle` so it stays addressable.
+
 ## 0.4.4 — live child event stream
 
 - Publish `<controlDir>/events.jsonl`, an append-only live tail carrying a running child's thinking chunks, assistant text chunks and tool rows — including for **background** spawns, which previously published no live progress at all because the live card channel only existed for foreground ones.

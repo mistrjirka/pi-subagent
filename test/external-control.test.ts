@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { afterEach, describe, it } from "node:test";
 import { ExternalControlBridge, type ExternallyControllableAgent } from "../external-control.js";
+import { AgentRegistry } from "../registry.js";
 
 const bridges: ExternalControlBridge[] = [];
 afterEach(() => {
@@ -96,5 +97,133 @@ describe("ExternalControlBridge", () => {
 		);
 		await eventually(() => agent.stopCalls === 1);
 		assert.equal(agent.status, "stopped");
+	});
+});
+
+/**
+ * Resident-aware fake: mirrors AgentProcess.stop() early-return semantics
+ * (a settled agent keeps its reported status) plus the markStopped()
+ * terminal marker, so bridge/registry wiring is exercised faithfully.
+ */
+class ResidentFakeAgent implements ExternallyControllableAgent {
+	readonly agentId = "max";
+	readonly label = "implementer";
+	readonly startedAt = Date.now();
+	readonly model = "provider/model";
+	readonly thinking = "medium";
+	persistent: boolean;
+	status: "queued" | "running" | "completed" | "failed" | "stopped" = "running";
+	awaitingParent = false;
+	sessionPath = "/tmp/child.jsonl";
+	stoppedByControl = false;
+	/** Settled by waitForCompletion (child gone, reported status terminal-ish). */
+	done = false;
+	stopCalls = 0;
+
+	constructor(persistent = false) {
+		this.persistent = persistent;
+	}
+
+	async sendMessage(): Promise<boolean> {
+		return true;
+	}
+
+	async stop(): Promise<void> {
+		this.stopCalls++;
+		if (this.done) return; // already settled — reported status untouched
+		this.status = "stopped";
+		this.stoppedByControl = true;
+	}
+
+	markStopped(): void {
+		this.stoppedByControl = true;
+		if (this.status === "stopped" || this.status === "failed") return;
+		this.status = "stopped";
+	}
+}
+
+function readState(bridge: ExternalControlBridge): string {
+	return (JSON.parse(fs.readFileSync(bridge.statusPath, "utf8")) as { state: string }).state;
+}
+
+function readStatus(bridge: ExternalControlBridge): { state: string; updatedAt: number } {
+	return JSON.parse(fs.readFileSync(bridge.statusPath, "utf8")) as { state: string; updatedAt: number };
+}
+
+function sleep(ms: number): Promise<void> {
+	return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function testMetadata(): { profile: string; parentPid: number; treeId: string; parentAgentId: string } {
+	return { profile: "implementer", parentPid: process.pid, treeId: "tree-1", parentAgentId: "root" };
+}
+
+describe("ExternalControlBridge — stopped residents wind down", () => {
+	it("a completed persistent agent removed via stopAndRemove ends stopped with no further writes", async () => {
+		// Settled persistent agent: stop()'s early return leaves completed,
+		// which the bridge maps to idle (the bug: idle forever after stop).
+		const agent = new ResidentFakeAgent(true);
+		agent.done = true;
+		agent.status = "completed";
+		const registry = new AgentRegistry({ notify: () => {} });
+		registry.register(agent);
+		// Production wiring (index.ts): the bridge stop action delegates to
+		// the registry's explicit-stop path.
+		const bridge = new ExternalControlBridge(agent, testMetadata(), {
+			stop: async () => {
+				await registry.stopAndRemove(agent.agentId);
+			},
+		});
+		bridges.push(bridge);
+		bridge.start();
+		await eventually(() => readState(bridge) === "idle");
+
+		assert.equal(await registry.stopAndRemove(agent.agentId), true);
+		assert.equal(agent.status, "stopped");
+		await eventually(() => readState(bridge) === "stopped");
+		const frozen = fs.readFileSync(bridge.statusPath, "utf8");
+		await sleep(550); // >2 ticks at the 200 ms cadence
+		assert.equal(fs.readFileSync(bridge.statusPath, "utf8"), frozen, "bridge stopped polling: no further writes");
+	});
+
+	it("a normal non-resident completion still ends at completed with its bridge stopped", async () => {
+		const agent = new ResidentFakeAgent(false);
+		const registry = new AgentRegistry({ notify: () => {} });
+		registry.register(agent);
+		const bridge = new ExternalControlBridge(agent, testMetadata());
+		bridges.push(bridge);
+		bridge.start();
+		await eventually(() => readState(bridge) === "running");
+
+		// Normal completion path: settle first (done), then complete().
+		agent.done = true;
+		agent.status = "completed";
+		await registry.complete(agent, {
+			status: "completed",
+			output: "done",
+			stats: { tokens: 1, toolUses: 0, durationMs: 1 },
+		});
+
+		assert.equal(agent.status, "completed", "complete() must not relabel as stopped");
+		await eventually(() => readState(bridge) === "completed");
+		const frozen = fs.readFileSync(bridge.statusPath, "utf8");
+		await sleep(550);
+		assert.equal(fs.readFileSync(bridge.statusPath, "utf8"), frozen, "bridge stopped polling: no further writes");
+	});
+
+	it("a resident agent left idle (never stopped) keeps heartbeating idle", async () => {
+		const agent = new ResidentFakeAgent(true);
+		agent.done = true;
+		agent.status = "completed";
+		const bridge = new ExternalControlBridge(agent, testMetadata());
+		bridges.push(bridge);
+		bridge.start();
+
+		await eventually(() => readState(bridge) === "idle");
+		const first = readStatus(bridge);
+		await sleep(500);
+		const second = readStatus(bridge);
+		assert.equal(second.state, "idle");
+		assert.ok(second.updatedAt > first.updatedAt, "idle heartbeat continues while resident");
 	});
 });

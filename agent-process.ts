@@ -318,6 +318,23 @@ export class AgentProcess {
 		await this.hardStop();
 	}
 
+	/**
+	 * Record an explicit user stop as the reported terminal state.
+	 *
+	 * stop() early-returns for an already-settled agent (a persistent agent
+	 * sitting at completed/idle), so the normal completion path keeps
+	 * reporting completed/failed. stopAndRemove() calls this right after
+	 * stop() so the external-control bridge's terminal check observes
+	 * "stopped" and winds down instead of heartbeating idle forever.
+	 * Idempotent, and never overwrites an already-terminal failed — failed
+	 * is terminal on its own and the bridge already stops polling for it.
+	 */
+	markStopped(): void {
+		this.stoppedByControl = true;
+		if (this.status === "stopped" || this.status === "failed") return;
+		this.status = "stopped";
+	}
+
 	/** stdin EOF + SIGTERM fallback; waits for the child to exit. */
 	private async hardStop(): Promise<void> {
 		this.status = "stopped";

@@ -793,3 +793,51 @@ describe("AgentProcess — onStream sink (events.jsonl tail)", () => {
 		assert.deepEqual(streamed, [{ type: "thinking" }]);
 	});
 });
+
+describe("AgentProcess — markStopped (explicit-stop terminal marker)", () => {
+	async function settledPersistent(): Promise<{ agent: AgentProcess }> {
+		const { agent, fake } = makeAgent({ cwd: "/tmp", persistent: true });
+		await agent.spawnAndSend("do it");
+		const done = agent.waitForCompletion();
+		fake.emitSettled();
+		await done; // → completed, process resident (idle)
+		assert.equal(agent.status, "completed");
+		return { agent };
+	}
+
+	it("stop() alone leaves a settled persistent agent at completed (normal path)", async () => {
+		const { agent } = await settledPersistent();
+		await agent.stop(); // early return: child already gone
+		assert.equal(agent.status, "completed", "stop() must not relabel completions");
+	});
+
+	it("markStopped flips a settled persistent agent to stopped", async () => {
+		const { agent } = await settledPersistent();
+		await agent.stop();
+		agent.markStopped();
+		assert.equal(agent.status, "stopped");
+		assert.equal(agent.stoppedByControl, true, "explicit stop suppresses later notifications");
+	});
+
+	it("markStopped is idempotent", async () => {
+		const { agent } = await settledPersistent();
+		agent.markStopped();
+		agent.markStopped();
+		assert.equal(agent.status, "stopped");
+	});
+
+	it("markStopped keeps an already-terminal failed", async () => {
+		const { agent, fake } = makeAgent({ cwd: "/tmp" });
+		await agent.spawnAndSend("do it");
+		fake.emitEvent({
+			type: "agent_end",
+			messages: [{ role: "assistant", stopReason: "error", errorMessage: "API boom" }],
+		} as never);
+		const done = agent.waitForCompletion();
+		fake.emitSettled();
+		await done;
+		assert.equal(agent.status, "failed");
+		agent.markStopped();
+		assert.equal(agent.status, "failed", "failed is already terminal — not disguised");
+	});
+});

@@ -456,8 +456,9 @@ export default function (pi: ExtensionAPI) {
 								content:
 									`Subagent @${agent.agentId} has been running unsupervised for about ${minutes} minute${minutes === 1 ? "" : "s"}. ` +
 									`Latest activity: ${activity}. Check whether it is making sensible progress. ` +
-									"SUPERVISION CHECK REQUIRED: review the transcript before waiting again and decide whether progress is HEALTHY, STALLED, or DRIFTING. " +
-									"If healthy, continue supervision with agent_wait (normally a 150-second window); if stalled/drifting, inspect, steer, or stop. Do not use shell sleep or polling." +
+									"SUPERVISION CHECK REQUIRED: review the transcript before waiting again: is the child making real progress on its task? " +
+									"If it is, continue supervision with agent_wait (normally a 150-second window). " +
+									"If it looks stuck, is repeating itself, or has wandered off the task, steer it with agent_send, inspect it, or stop it. Do not use shell sleep or polling." +
 									`\n\nRecent transcript (${transcript.source}):\n${transcript.text}`,
 								display: true,
 								details: {
@@ -1051,7 +1052,7 @@ export default function (pi: ExtensionAPI) {
 		promptSnippet: "Wait for a background or resumed child to settle",
 		promptGuidelines: [
 			"Use agent_wait when a background child's result becomes the next dependency instead of polling shell/status output.",
-			"For supervision, a 150-second wait window is a useful cadence. On timeout, agent_wait itself returns recent activity plus up to ~10k characters of transcript; review that snapshot and decide HEALTHY, STALLED, or DRIFTING before waiting again. Use agent_inspect only for older/deeper history.",
+			"For supervision, a 150-second wait window is a useful cadence. On timeout, agent_wait itself returns recent activity plus up to ~10k characters of transcript; review that snapshot and judge whether the child is making real progress on its task before waiting again. If it is, wait again; if it looks stuck, is repeating itself, or has wandered off the task, steer it with agent_send, inspect it, or stop it. Use agent_inspect only for older/deeper history.",
 			"If timeout_seconds is omitted, agent_wait uses a 180-second supervision window. timeout_seconds: 0 returns an immediate live snapshot.",
 			"If agent_wait returns an ask_parent question, answer that same child with agent_send; call agent_wait again only after the answer when you need the resumed result.",
 		],
@@ -1101,8 +1102,8 @@ export default function (pi: ExtensionAPI) {
 							type: "text",
 							text:
 								`${window}; ${atId(agentId)} is still ${live.status ?? "running"}. Latest activity: ${activitySummary(activity)}. ` +
-								"The wait window did not stop the agent. SUPERVISION CHECK REQUIRED: use the activity + transcript below to decide HEALTHY, STALLED, or DRIFTING before waiting again. " +
-								"Healthy → wait again; stalled/drifting → steer or stop. Use agent_inspect only if you need older/deeper history." +
+								"The wait window did not stop the agent. SUPERVISION CHECK REQUIRED: use the activity + transcript below to judge whether the child is making real progress on its task before waiting again. " +
+								"If it is, wait again; if it looks stuck, is repeating itself, or has wandered off the task, steer it with agent_send, inspect it, or stop it. Use agent_inspect only if you need older/deeper history." +
 								`\n\nRecent activity:\n${recentActivity}\n\nRecent transcript (up to ~10k chars; ${transcript.source}):\n${transcript.text}`,
 						},
 					],

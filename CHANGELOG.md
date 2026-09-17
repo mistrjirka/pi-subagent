@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.7 — plain supervision wording
+
+- Replace the HEALTHY / STALLED / DRIFTING taxonomy in the supervision texts with a plain progress check: is the child making real progress on its task, and if it looks stuck, is repeating itself, or has wandered off the task, steer it with `agent_send`, inspect it, or stop it.
+- The mechanism is unchanged: the 150-second cadence advice, the 180-second default window, `timeout_seconds: 0` snapshots, the self-contained checkpoint (recent activity plus up to ~10k characters of transcript), the `subagent-supervision` reminder after three unsupervised minutes, and `agent_inspect` for older history all behave exactly as before.
+- A test pins the absence of those three words in the reader-facing strings together with the presence of the concrete signals and actions, so the taxonomy cannot creep back.
+
 ## 0.4.6 — local transcript times
 
 - Stamp supervision transcript lines with the system's local wall clock plus a relative age, e.g. `[17:42:03 · 12s ago] assistant: …`. Times use local date getters only, so a machine at UTC+2 shows `17:42:03` for an instant stored as `15:42:03Z`; a line from another local day shows `MM-DD HH:MM` instead. An absent or unusable time renders exactly as before, with no brackets.

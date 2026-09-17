@@ -103,7 +103,16 @@ function markdownFiles(directory: string): string[] {
 	try {
 		return fs
 			.readdirSync(directory, { withFileTypes: true })
-			.filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith(".md"))
+			.filter((entry) => {
+				if (!entry.name.toLowerCase().endsWith(".md")) return false;
+				if (entry.isFile()) return true;
+				if (!entry.isSymbolicLink()) return false;
+				try {
+					return fs.statSync(path.join(directory, entry.name)).isFile();
+				} catch {
+					return false;
+				}
+			})
 			.map((entry) => path.join(directory, entry.name))
 			.sort();
 	} catch {

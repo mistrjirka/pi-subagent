@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.1 — symlink profile discovery
+
+- Discover Markdown profiles installed as symlinks, including the wiki `just link pi` layout.
+- Ignore broken profile symlinks without hiding other valid profiles in the same directory.
+
 ## 0.1.0 — profiled fork
 
 - Add Markdown agent profiles with project-over-global overrides and exact `allowed_subagents` delegation.

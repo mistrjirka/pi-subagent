@@ -44,6 +44,28 @@ describe("agent profile discovery", () => {
 		assert.equal(reviewer.prompt, "Review the completed change and report findings as normal text.");
 	});
 
+	it("discovers global profiles installed as symlinks", () => {
+		const { root, agentDir, cwd } = fixture();
+		const source = path.join(root, "generated", "implementer.md");
+		write(source, "---\nname: implementer\nallowed_subagents: [explore]\n---\n\nlinked profile\n");
+		fs.symlinkSync(source, path.join(agentDir, "agents", "implementer.md"));
+
+		const profile = discoverAgentProfiles(cwd).profiles.get("implementer");
+		assert.ok(profile);
+		assert.equal(profile.prompt, "linked profile");
+		assert.deepEqual(profile.allowedSubagents, ["explore"]);
+	});
+
+	it("ignores broken profile symlinks without hiding valid profiles", () => {
+		const { root, agentDir, cwd } = fixture();
+		write(path.join(agentDir, "agents", "explore.md"), "---\nname: explore\n---\n\nvalid\n");
+		fs.symlinkSync(path.join(root, "missing.md"), path.join(agentDir, "agents", "broken.md"));
+
+		const catalog = discoverAgentProfiles(cwd);
+		assert.equal(catalog.profiles.get("explore")?.prompt, "valid");
+		assert.equal(catalog.profiles.has("broken"), false);
+	});
+
 	it("project profiles override global profiles by exact agent name", () => {
 		const { agentDir, cwd } = fixture();
 		write(path.join(agentDir, "agents", "implementer.md"), "---\nname: implementer\n---\n\nglobal\n");

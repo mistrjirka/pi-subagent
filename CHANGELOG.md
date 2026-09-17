@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.1 — default supervised wait
+
+- Make `agent_wait` without `timeout_seconds` return after the default 180-second supervision window instead of blocking indefinitely.
+- The default expiry returns the same recent transcript/activity check and never stops the child.
+
 ## 0.4.0 — live transcript inspection
 
 - Add read-only `agent_inspect` backed by Pi RPC `get_messages` for recent live child transcript monitoring.

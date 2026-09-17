@@ -60,6 +60,7 @@ import { formatTranscript } from "./transcript.js";
 import { createSubtreeDisplay } from "./tree-display.js";
 import type { SubagentDetails } from "./types.js";
 import { atId, sendView, spawnView, stopView } from "./views.js";
+import { resolveWaitTimeoutSeconds } from "./wait-policy.js";
 import { AgentWidget } from "./widget.js";
 
 // ─── Running background agents registry ─────────────────────
@@ -279,7 +280,7 @@ const WaitParamsSchema = Type.Object({
 		Type.Number({
 			minimum: 0,
 			description:
-				"Optional wait-window timeout in seconds. Expiry returns a live status snapshot and never stops the child. Omit to wait indefinitely; 0 returns an immediate snapshot.",
+				"Optional wait-window timeout in seconds. Expiry returns a live status snapshot and never stops the child. Omit for the default 180-second supervision window; 0 returns an immediate snapshot.",
 		}),
 	),
 });
@@ -1035,12 +1036,12 @@ export default function (pi: ExtensionAPI) {
 		name: "agent_wait",
 		label: "Wait for Agent",
 		description:
-			"Wait for a direct child to settle, fail/stop, or ask its parent a question. timeout_seconds limits only this wait call: expiry returns a live snapshot and never stops the child. Omit it to wait indefinitely.",
+			"Wait for a direct child to settle, fail/stop, or ask its parent a question. timeout_seconds limits only this wait call: expiry returns a live transcript snapshot and never stops the child. Omit it for the default 180-second supervision window.",
 		promptSnippet: "Wait for a background or resumed child to settle",
 		promptGuidelines: [
 			"Use agent_wait when a background child's result becomes the next dependency instead of polling shell/status output.",
 			"For supervision, a 150-second wait window is a useful cadence. A wait timeout never stops the child; inspect the returned latest activity and wait again when progress is sensible.",
-			"Omit timeout_seconds when you truly want to block until settlement. timeout_seconds: 0 returns an immediate live snapshot.",
+			"If timeout_seconds is omitted, agent_wait uses a 180-second supervision window. timeout_seconds: 0 returns an immediate live snapshot.",
 			"If agent_wait returns an ask_parent question, answer that same child with agent_send; call agent_wait again only after the answer when you need the resumed result.",
 		],
 		parameters: WaitParamsSchema,
@@ -1051,12 +1052,16 @@ export default function (pi: ExtensionAPI) {
 			const rawId = params.agent_id?.trim();
 			const agentId = rawId?.replace(/^@/, "");
 			if (!agentId) return toErrorResult("`agent_id` is required.");
-			const timeoutSeconds = params.timeout_seconds;
-			if (timeoutSeconds !== undefined && (!Number.isFinite(timeoutSeconds) || timeoutSeconds < 0)) {
+			const requestedTimeoutSeconds = params.timeout_seconds;
+			if (
+				requestedTimeoutSeconds !== undefined &&
+				(!Number.isFinite(requestedTimeoutSeconds) || requestedTimeoutSeconds < 0)
+			) {
 				return toErrorResult("`timeout_seconds` must be a finite non-negative number.");
 			}
-			const timeoutMs = timeoutSeconds === undefined ? undefined : timeoutSeconds * 1000;
-			const waitLabel = timeoutSeconds === undefined ? "until settlement" : `up to ${timeoutSeconds}s`;
+			const timeoutSeconds = resolveWaitTimeoutSeconds(requestedTimeoutSeconds);
+			const timeoutMs = timeoutSeconds * 1000;
+			const waitLabel = `up to ${timeoutSeconds}s`;
 			onUpdate?.({
 				content: [{ type: "text", text: `Waiting for ${atId(agentId)} (${waitLabel})…` }],
 				details: { agentId, timeoutSeconds },

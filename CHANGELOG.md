@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.2 — reliable supervision transcript
+
+- Stop swallowing `get_messages` RPC failures as empty transcripts.
+- Fall back from live RPC to the persisted child session and then to the live event trace.
+- Make timed wait/reminder output require a HEALTHY / STALLED / DRIFTING supervision decision before another wait.
+
 ## 0.4.1 — default supervised wait
 
 - Make `agent_wait` without `timeout_seconds` return after the default 180-second supervision window instead of blocking indefinitely.

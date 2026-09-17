@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, it } from "node:test";
-import { formatTranscript, formatTranscriptMessage } from "../transcript.js";
+import { formatTranscript, formatTranscriptMessage, getMonitoringTranscript } from "../transcript.js";
 
 describe("transcript formatting", () => {
 	it("shows user, assistant tool calls, and tool results while hiding raw thinking", () => {
@@ -43,5 +46,74 @@ describe("transcript formatting", () => {
 			}),
 			"tool result (bash ERROR): boom",
 		);
+	});
+});
+
+describe("monitoring transcript fallbacks", () => {
+	it("uses live RPC messages when available", async () => {
+		const snapshot = await getMonitoringTranscript({
+			getMessages: async () => [{ role: "user", content: "live task" }],
+		});
+		assert.equal(snapshot.source, "rpc");
+		assert.match(snapshot.text, /live task/);
+	});
+
+	it("falls back to the persisted session when get_messages fails", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-subagent-transcript-"));
+		const sessionPath = join(dir, "child.jsonl");
+		try {
+			writeFileSync(
+				sessionPath,
+				`${[
+					JSON.stringify({ type: "session", id: "s1" }),
+					JSON.stringify({ type: "message", message: { role: "user", content: "persisted task" } }),
+					JSON.stringify({
+						type: "message",
+						message: {
+							role: "toolResult",
+							toolName: "bash",
+							isError: false,
+							content: [{ type: "text", text: "build ok" }],
+						},
+					}),
+				].join("\n")}\n`,
+			);
+			const snapshot = await getMonitoringTranscript({
+				getMessages: async () => {
+					throw new Error("RPC timeout waiting for get_messages");
+				},
+				sessionPath,
+			});
+			assert.equal(snapshot.source, "session");
+			assert.match(snapshot.text, /get_messages unavailable/);
+			assert.match(snapshot.text, /persisted task/);
+			assert.match(snapshot.text, /build ok/);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("falls back to the live event trace when messages are empty", async () => {
+		const snapshot = await getMonitoringTranscript({
+			getMessages: async () => [],
+			getEvents: () => [
+				{ kind: "text", text: "Checking build." },
+				{ kind: "tool", name: "bash", args: "npm run typecheck" },
+			],
+		});
+		assert.equal(snapshot.source, "events");
+		assert.match(snapshot.text, /Checking build/);
+		assert.match(snapshot.text, /npm run typecheck/);
+	});
+
+	it("does not silently report an RPC failure as an empty transcript", async () => {
+		const snapshot = await getMonitoringTranscript({
+			getMessages: async () => {
+				throw new Error("unsupported get_messages");
+			},
+		});
+		assert.equal(snapshot.source, "none");
+		assert.match(snapshot.text, /transcript unavailable/);
+		assert.match(snapshot.text, /unsupported get_messages/);
 	});
 });

@@ -56,7 +56,7 @@ import { type AgentMessage, type AgentQuestion, formatFrom } from "./protocol.js
 import { AgentRegistry, type AgentSettlement, type WidgetSurface } from "./registry.js";
 import { renderNotification } from "./render.js";
 import { runSpawnSession, type SpawnOutcome } from "./spawn-session.js";
-import { formatTranscript } from "./transcript.js";
+import { getMonitoringTranscript } from "./transcript.js";
 import { createSubtreeDisplay } from "./tree-display.js";
 import type { SubagentDetails } from "./types.js";
 import { atId, sendView, spawnView, stopView } from "./views.js";
@@ -445,23 +445,28 @@ export default function (pi: ExtensionAPI) {
 					remind: async (agent: Parameters<typeof notifyCompletion>[1], unsupervisedMs: number) => {
 						const minutes = Math.max(1, Math.round(unsupervisedMs / 60_000));
 						const activity = activitySummary(agent.getLatestActivity?.());
-						const messages = agent.getMessages ? await agent.getMessages().catch(() => []) : [];
-						const transcript = formatTranscript(messages, { maxMessages: 4, maxChars: 4_000, perMessageChars: 1_000 });
+						const transcript = await getMonitoringTranscript(agent, {
+							maxMessages: 4,
+							maxChars: 4_000,
+							perMessageChars: 1_000,
+						});
 						pi.sendMessage(
 							{
 								customType: "subagent-supervision",
 								content:
 									`Subagent @${agent.agentId} has been running unsupervised for about ${minutes} minute${minutes === 1 ? "" : "s"}. ` +
 									`Latest activity: ${activity}. Check whether it is making sensible progress. ` +
-									"If it is fine, continue supervision with agent_wait (normally a 150-second window); otherwise steer it with agent_send or stop it. Do not use shell sleep or polling." +
-									`\n\nRecent transcript:\n${transcript}`,
+									"SUPERVISION CHECK REQUIRED: review the transcript before waiting again and decide whether progress is HEALTHY, STALLED, or DRIFTING. " +
+									"If healthy, continue supervision with agent_wait (normally a 150-second window); if stalled/drifting, inspect, steer, or stop. Do not use shell sleep or polling." +
+									`\n\nRecent transcript (${transcript.source}):\n${transcript.text}`,
 								display: true,
 								details: {
 									agentId: agent.agentId,
 									label: agent.label,
 									state: agent.status ?? "running",
 									activity: agent.getLatestActivity?.(),
-									transcript,
+									transcript: transcript.text,
+									transcriptSource: transcript.source,
 									unsupervisedMs,
 								},
 							},
@@ -1040,7 +1045,7 @@ export default function (pi: ExtensionAPI) {
 		promptSnippet: "Wait for a background or resumed child to settle",
 		promptGuidelines: [
 			"Use agent_wait when a background child's result becomes the next dependency instead of polling shell/status output.",
-			"For supervision, a 150-second wait window is a useful cadence. A wait timeout never stops the child; inspect the returned latest activity and wait again when progress is sensible.",
+			"For supervision, a 150-second wait window is a useful cadence. On timeout, review the returned transcript before waiting again; explicitly decide HEALTHY, STALLED, or DRIFTING. If the transcript is insufficient, call agent_inspect first.",
 			"If timeout_seconds is omitted, agent_wait uses a 180-second supervision window. timeout_seconds: 0 returns an immediate live snapshot.",
 			"If agent_wait returns an ask_parent question, answer that same child with agent_send; call agent_wait again only after the answer when you need the resumed result.",
 		],
@@ -1077,8 +1082,11 @@ export default function (pi: ExtensionAPI) {
 				if (!live) return toErrorResult(`Agent ${atId(agentId)} stopped being waitable while the wait window expired.`);
 				const activity = live.getLatestActivity?.();
 				const elapsedMs = live.startedAt ? Date.now() - live.startedAt : undefined;
-				const messages = live.getMessages ? await live.getMessages().catch(() => []) : [];
-				const transcript = formatTranscript(messages, { maxMessages: 6, maxChars: 6_000, perMessageChars: 1_200 });
+				const transcript = await getMonitoringTranscript(live, {
+					maxMessages: 6,
+					maxChars: 6_000,
+					perMessageChars: 1_200,
+				});
 				const window = timeoutSeconds === 0 ? "Status snapshot" : `Wait window of ${timeoutSeconds}s expired`;
 				return {
 					content: [
@@ -1086,8 +1094,9 @@ export default function (pi: ExtensionAPI) {
 							type: "text",
 							text:
 								`${window}; ${atId(agentId)} is still ${live.status ?? "running"}. Latest activity: ${activitySummary(activity)}. ` +
-								"The wait window did not stop the agent. If progress is sensible, wait again; otherwise steer with agent_send or stop it." +
-								`\n\nRecent transcript:\n${transcript}`,
+								"The wait window did not stop the agent. SUPERVISION CHECK REQUIRED: review the transcript before calling agent_wait again and decide HEALTHY, STALLED, or DRIFTING. " +
+								"If the evidence is insufficient, call agent_inspect. Healthy → wait again; stalled/drifting → steer or stop." +
+								`\n\nRecent transcript (${transcript.source}):\n${transcript.text}`,
 						},
 					],
 					details: {
@@ -1163,8 +1172,11 @@ export default function (pi: ExtensionAPI) {
 			if (!Number.isInteger(maxMessages) || maxMessages < 1 || maxMessages > 30) {
 				return toErrorResult("`max_messages` must be an integer from 1 to 30.");
 			}
-			const messages = agent.getMessages ? await agent.getMessages().catch(() => []) : [];
-			const transcript = formatTranscript(messages, { maxMessages, maxChars: 20_000, perMessageChars: 2_000 });
+			const transcript = await getMonitoringTranscript(agent, {
+				maxMessages,
+				maxChars: 20_000,
+				perMessageChars: 2_000,
+			});
 			const activity = agent.getLatestActivity?.();
 			const elapsedMs = agent.startedAt ? Date.now() - agent.startedAt : undefined;
 			if (!HAS_PARENT) registry.touchSupervision(agentId);
@@ -1172,7 +1184,7 @@ export default function (pi: ExtensionAPI) {
 				content: [
 					{
 						type: "text",
-						text: `${atId(agentId)} — ${agent.status ?? "running"}; latest activity: ${activitySummary(activity)}\n\nRecent transcript:\n${transcript}`,
+						text: `${atId(agentId)} — ${agent.status ?? "running"}; latest activity: ${activitySummary(activity)}\n\nRecent transcript (${transcript.source}):\n${transcript.text}`,
 					},
 				],
 				details: {
@@ -1180,7 +1192,8 @@ export default function (pi: ExtensionAPI) {
 					label: agent.label,
 					state: agent.status ?? "running",
 					activity,
-					transcript,
+					transcript: transcript.text,
+					transcriptSource: transcript.source,
 					elapsedMs,
 					sessionPath: agent.sessionPath,
 				},

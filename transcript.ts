@@ -1,3 +1,6 @@
+import { closeSync, fstatSync, openSync, readSync } from "node:fs";
+import type { RenderEvent } from "./types.js";
+
 /**
  * Read-only transcript formatting for live subagent supervision.
  *
@@ -103,4 +106,107 @@ export function formatTranscript(messages: readonly unknown[], options: Transcri
 	kept.reverse();
 	const omitted = selected.length < messages.length || kept.length < rendered.length;
 	return `${omitted ? "[… earlier transcript omitted …]\n\n" : ""}${kept.join("\n\n")}`;
+}
+
+export interface TranscriptReadableAgent {
+	getMessages?: () => Promise<unknown[]>;
+	getEvents?: () => RenderEvent[];
+	sessionPath?: string;
+}
+
+export interface MonitoringTranscript {
+	text: string;
+	source: "rpc" | "session" | "events" | "none";
+	rpcError?: string;
+}
+
+function recentSessionMessages(sessionPath: string, maxBytes = 512 * 1024): unknown[] {
+	let fd: number | undefined;
+	try {
+		fd = openSync(sessionPath, "r");
+		const size = fstatSync(fd).size;
+		const start = Math.max(0, size - maxBytes);
+		const length = size - start;
+		if (length <= 0) return [];
+		const buffer = Buffer.allocUnsafe(length);
+		const read = readSync(fd, buffer, 0, length, start);
+		let text = buffer.subarray(0, read).toString("utf8");
+		if (start > 0) {
+			const firstNl = text.indexOf("\n");
+			text = firstNl >= 0 ? text.slice(firstNl + 1) : "";
+		}
+		const messages: unknown[] = [];
+		for (const line of text.split("\n")) {
+			if (!line.trim()) continue;
+			try {
+				const entry = JSON.parse(line) as { type?: unknown; message?: unknown };
+				if (entry.type === "message" && entry.message && typeof entry.message === "object")
+					messages.push(entry.message);
+			} catch {
+				// A concurrently-appended final line can be partial; ignore it.
+			}
+		}
+		return messages;
+	} catch {
+		return [];
+	} finally {
+		if (fd !== undefined) closeSync(fd);
+	}
+}
+
+function formatEventTranscript(events: readonly RenderEvent[], maxEvents = 12, maxChars = 8_000): string {
+	const rendered = events.slice(-maxEvents).map((event) => {
+		if (event.kind === "thinking") return "[thinking]";
+		if (event.kind === "tool") return `[tool call] ${event.name}${event.args ? ` ${event.args}` : ""}`;
+		return `assistant: ${event.text}`;
+	});
+	if (!rendered.length) return "[no live event transcript yet]";
+	let text = rendered.join("\n\n");
+	if (text.length > maxChars) text = `[… earlier live events omitted …]\n\n${text.slice(-maxChars)}`;
+	return text;
+}
+
+export async function getMonitoringTranscript(
+	agent: TranscriptReadableAgent,
+	options: TranscriptFormatOptions = {},
+): Promise<MonitoringTranscript> {
+	let rpcError: string | undefined;
+	if (agent.getMessages) {
+		try {
+			const messages = await agent.getMessages();
+			if (messages.length) return { text: formatTranscript(messages, options), source: "rpc" };
+		} catch (error) {
+			rpcError = error instanceof Error ? error.message : String(error);
+		}
+	}
+
+	if (agent.sessionPath) {
+		const persisted = recentSessionMessages(agent.sessionPath);
+		if (persisted.length) {
+			const prefix = rpcError
+				? `[live get_messages unavailable: ${rpcError}; showing persisted session fallback]\n\n`
+				: "[showing persisted session fallback]\n\n";
+			return {
+				text: prefix + formatTranscript(persisted, options),
+				source: "session",
+				...(rpcError ? { rpcError } : {}),
+			};
+		}
+	}
+
+	const events = agent.getEvents?.() ?? [];
+	if (events.length) {
+		const prefix = rpcError
+			? `[live get_messages unavailable: ${rpcError}; showing live event fallback]\n\n`
+			: "[live Pi message transcript is empty; showing live event fallback]\n\n";
+		return { text: prefix + formatEventTranscript(events), source: "events", ...(rpcError ? { rpcError } : {}) };
+	}
+
+	return {
+		text: rpcError
+			? `[transcript unavailable: ${rpcError}; no persisted/session event fallback available]`
+			: "[no transcript messages yet]",
+		source: "none",
+		...(rpcError ? { rpcError } : {}),
+	};
 }

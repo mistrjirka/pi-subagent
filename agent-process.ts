@@ -226,10 +226,15 @@ export class AgentProcess {
 		return data?.text ?? "";
 	}
 
-	/** Live child transcript messages from Pi RPC. Read-only; safe while the child is running. */
+	/** Live child transcript messages from Pi RPC. Read-only; safe while the child is running.
+	 * Unlike best-effort stats helpers, transcript failures are surfaced so monitoring
+	 * can fall back explicitly instead of misreporting an RPC error as an empty transcript. */
 	async getMessages(): Promise<unknown[]> {
-		const data = await this.sendData<{ messages?: unknown[] }>({ type: "get_messages" });
-		return Array.isArray(data?.messages) ? data.messages : [];
+		const response = await this.client.sendCommand({ type: "get_messages" });
+		if (!response.success) throw new Error(`get_messages failed: ${response.error}`);
+		const data = response.data as { messages?: unknown[] } | undefined;
+		if (!data || !Array.isArray(data.messages)) throw new Error("get_messages returned no messages array");
+		return data.messages;
 	}
 
 	/** Best-effort token/tool stats from get_session_stats. */

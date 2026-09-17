@@ -25,6 +25,7 @@ import type { AgentCompletion } from "./agent-process.js";
 import type { AgentActivity } from "./event-interpret.js";
 import { randomAgentName } from "./name-gen.js";
 import { type AgentMessage, type AgentQuestion, type RouteDecision, routeMessage } from "./protocol.js";
+import type { RenderEvent } from "./types.js";
 
 /** Narrow agent surface the registry needs — AgentProcess satisfies it. */
 export interface RegisteredAgent {
@@ -42,6 +43,8 @@ export interface RegisteredAgent {
 	getLatestActivity?: () => AgentActivity | undefined;
 	/** Actual live Pi conversation messages for transcript inspection. */
 	getMessages?: () => Promise<unknown[]>;
+	/** In-memory event trace fallback when RPC/persisted session inspection is unavailable. */
+	getEvents?: () => RenderEvent[];
 	/** Persisted child session file, when available. */
 	readonly sessionPath?: string;
 	/** Deliver one in-tree message to this agent (AgentProcess.sendMessage). */

@@ -3,7 +3,12 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
-import { formatTranscript, formatTranscriptMessage, getMonitoringTranscript } from "../transcript.js";
+import {
+	formatRecentActivity,
+	formatTranscript,
+	formatTranscriptMessage,
+	getMonitoringTranscript,
+} from "../transcript.js";
 
 describe("transcript formatting", () => {
 	it("shows user, assistant tool calls, and tool results while hiding raw thinking", () => {
@@ -34,6 +39,19 @@ describe("transcript formatting", () => {
 		assert.doesNotMatch(text, /m0/);
 		assert.match(text, /m5/);
 		assert.match(text, /m7/);
+	});
+
+	it("formats a compact recent activity trail", () => {
+		const text = formatRecentActivity([
+			{ kind: "thinking" },
+			{ kind: "tool", name: "read", args: "src/a.ts" },
+			{ kind: "text", text: "Found the owning helper." },
+			{ kind: "tool", name: "bash", args: "npm run typecheck" },
+		]);
+		assert.match(text, /\[thinking\]/);
+		assert.match(text, /\[tool call\] read src\/a\.ts/);
+		assert.match(text, /assistant: Found the owning helper/);
+		assert.match(text, /npm run typecheck/);
 	});
 
 	it("marks failed tool results", () => {

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.3 — self-contained wait supervision
+
+- Make timed `agent_wait` checkpoints return a compact recent activity trail plus up to ~10k characters of recent transcript.
+- Keep `agent_inspect` as a deeper-history escape hatch rather than a normal step between waits.
+
 ## 0.4.2 — reliable supervision transcript
 
 - Stop swallowing `get_messages` RPC failures as empty transcripts.

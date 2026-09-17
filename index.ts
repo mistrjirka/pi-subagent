@@ -56,7 +56,7 @@ import { type AgentMessage, type AgentQuestion, formatFrom } from "./protocol.js
 import { AgentRegistry, type AgentSettlement, type WidgetSurface } from "./registry.js";
 import { renderNotification } from "./render.js";
 import { runSpawnSession, type SpawnOutcome } from "./spawn-session.js";
-import { getMonitoringTranscript } from "./transcript.js";
+import { formatRecentActivity, getMonitoringTranscript } from "./transcript.js";
 import { createSubtreeDisplay } from "./tree-display.js";
 import type { SubagentDetails } from "./types.js";
 import { atId, sendView, spawnView, stopView } from "./views.js";
@@ -1045,7 +1045,7 @@ export default function (pi: ExtensionAPI) {
 		promptSnippet: "Wait for a background or resumed child to settle",
 		promptGuidelines: [
 			"Use agent_wait when a background child's result becomes the next dependency instead of polling shell/status output.",
-			"For supervision, a 150-second wait window is a useful cadence. On timeout, review the returned transcript before waiting again; explicitly decide HEALTHY, STALLED, or DRIFTING. If the transcript is insufficient, call agent_inspect first.",
+			"For supervision, a 150-second wait window is a useful cadence. On timeout, agent_wait itself returns recent activity plus up to ~10k characters of transcript; review that snapshot and decide HEALTHY, STALLED, or DRIFTING before waiting again. Use agent_inspect only for older/deeper history.",
 			"If timeout_seconds is omitted, agent_wait uses a 180-second supervision window. timeout_seconds: 0 returns an immediate live snapshot.",
 			"If agent_wait returns an ask_parent question, answer that same child with agent_send; call agent_wait again only after the answer when you need the resumed result.",
 		],
@@ -1083,10 +1083,11 @@ export default function (pi: ExtensionAPI) {
 				const activity = live.getLatestActivity?.();
 				const elapsedMs = live.startedAt ? Date.now() - live.startedAt : undefined;
 				const transcript = await getMonitoringTranscript(live, {
-					maxMessages: 6,
-					maxChars: 6_000,
-					perMessageChars: 1_200,
+					maxMessages: 50,
+					maxChars: 10_000,
+					perMessageChars: 2_500,
 				});
+				const recentActivity = formatRecentActivity(live.getEvents?.() ?? [], 20, 4_000);
 				const window = timeoutSeconds === 0 ? "Status snapshot" : `Wait window of ${timeoutSeconds}s expired`;
 				return {
 					content: [
@@ -1094,9 +1095,9 @@ export default function (pi: ExtensionAPI) {
 							type: "text",
 							text:
 								`${window}; ${atId(agentId)} is still ${live.status ?? "running"}. Latest activity: ${activitySummary(activity)}. ` +
-								"The wait window did not stop the agent. SUPERVISION CHECK REQUIRED: review the transcript before calling agent_wait again and decide HEALTHY, STALLED, or DRIFTING. " +
-								"If the evidence is insufficient, call agent_inspect. Healthy → wait again; stalled/drifting → steer or stop." +
-								`\n\nRecent transcript (${transcript.source}):\n${transcript.text}`,
+								"The wait window did not stop the agent. SUPERVISION CHECK REQUIRED: use the activity + transcript below to decide HEALTHY, STALLED, or DRIFTING before waiting again. " +
+								"Healthy → wait again; stalled/drifting → steer or stop. Use agent_inspect only if you need older/deeper history." +
+								`\n\nRecent activity:\n${recentActivity}\n\nRecent transcript (up to ~10k chars; ${transcript.source}):\n${transcript.text}`,
 						},
 					],
 					details: {
@@ -1106,6 +1107,7 @@ export default function (pi: ExtensionAPI) {
 						timeoutSeconds,
 						activity,
 						transcript,
+						recentActivity,
 						elapsedMs,
 					},
 				};

@@ -154,7 +154,7 @@ function recentSessionMessages(sessionPath: string, maxBytes = 512 * 1024): unkn
 	}
 }
 
-function formatEventTranscript(events: readonly RenderEvent[], maxEvents = 12, maxChars = 8_000): string {
+export function formatRecentActivity(events: readonly RenderEvent[], maxEvents = 20, maxChars = 4_000): string {
 	const rendered = events.slice(-maxEvents).map((event) => {
 		if (event.kind === "thinking") return "[thinking]";
 		if (event.kind === "tool") return `[tool call] ${event.name}${event.args ? ` ${event.args}` : ""}`;
@@ -199,7 +199,7 @@ export async function getMonitoringTranscript(
 		const prefix = rpcError
 			? `[live get_messages unavailable: ${rpcError}; showing live event fallback]\n\n`
 			: "[live Pi message transcript is empty; showing live event fallback]\n\n";
-		return { text: prefix + formatEventTranscript(events), source: "events", ...(rpcError ? { rpcError } : {}) };
+		return { text: prefix + formatRecentActivity(events), source: "events", ...(rpcError ? { rpcError } : {}) };
 	}
 
 	return {

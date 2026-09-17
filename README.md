@@ -95,6 +95,40 @@ reviewer -> none
 
 Nothing is hardcoded about those names. Change `allowed_subagents` in the Markdown files to change the graph.
 
+## Migrating from `pi-subagents`
+
+Do not leave the old `pi-subagents` runtime enabled when switching to this fork. A child is a normal Pi process and loads globally enabled extensions, so running both subagent runtimes at once can reintroduce the old runtime's prompt/budget policy inside children. PiTTy supports either runtime; they do not need to be active together.
+
+```bash
+pi remove npm:pi-subagents
+pi install git:github.com/mistrjirka/pi-subagent
+```
+
+Existing `~/.pi/agent/agents/*.md` files can be reused. This runtime reads the Markdown body plus these frontmatter fields:
+
+- `name`
+- `description`
+- `model`
+- `thinking`
+- `allowed_subagents`
+
+Old orchestration fields such as `maxSubagentDepth`, `completionGuard`, `systemPromptMode`, `inheritProjectContext`, `inheritSkills`, and `defaultContext` are ignored by this runtime. They do not become hidden limits.
+
+Delegation is opt-in. Add the exact children a profile may launch; omitted means none. For the initial workflow discussed for this fork:
+
+```yaml
+# implementer.md
+allowed_subagents: [explore]
+
+# debugging-duck.md
+allowed_subagents: [explore]
+
+# explore/reviewer/impl-check profiles
+allowed_subagents: []
+```
+
+The parent/root still owns orchestration and may launch any configured profile. In particular, the implementer should delegate only discovery to `explore`; implementation review remains a parent-owned phase.
+
 ## Model and thinking configuration
 
 `agent_spawn` does **not** accept `model`, `thinking`, `tools`, timeout, or budget arguments.

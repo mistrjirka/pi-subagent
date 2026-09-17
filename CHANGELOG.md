@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.0 — live transcript inspection
+
+- Add read-only `agent_inspect` backed by Pi RPC `get_messages` for recent live child transcript monitoring.
+- Include short transcript tails in timed `agent_wait` supervision results and 3-minute fallback reminders.
+- Include assistant text, tool calls, user follow-ups and tool results while omitting raw thinking text from monitoring output.
+
 ## 0.3.0 — supervised waits
 
 - Add optional `timeout_seconds` to `agent_wait`; expiry returns latest child activity without stopping the child.

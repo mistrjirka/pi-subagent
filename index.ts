@@ -2,7 +2,7 @@
  * pi-subagent — spawn isolated sub‑agent pi instances + in-tree messaging.
  *
  * Architecture:
- *   index.ts          — tool registration (agent_spawn / agent_wait / agent_stop / agent_send) + routing glue
+ *   index.ts          — tool registration (agent_spawn / agent_wait / agent_inspect / agent_stop / agent_send) + routing glue
  *   protocol.ts       — pure JSONL protocol layer + in-tree routing (tested)
  *   rpc-client.ts     — stateful thin JSONL client (spawn + transport)
  *   event-interpret.ts— raw RpcEvent → AgentEvent adapter (pure, tested)
@@ -56,6 +56,7 @@ import { type AgentMessage, type AgentQuestion, formatFrom } from "./protocol.js
 import { AgentRegistry, type AgentSettlement, type WidgetSurface } from "./registry.js";
 import { renderNotification } from "./render.js";
 import { runSpawnSession, type SpawnOutcome } from "./spawn-session.js";
+import { formatTranscript } from "./transcript.js";
 import { createSubtreeDisplay } from "./tree-display.js";
 import type { SubagentDetails } from "./types.js";
 import { atId, sendView, spawnView, stopView } from "./views.js";
@@ -205,6 +206,11 @@ interface WaitParams {
 	timeout_seconds?: number;
 }
 
+interface InspectParams {
+	agent_id: string;
+	max_messages?: number;
+}
+
 /** agent_stop tool params. */
 interface StopParams {
 	agent_id: string;
@@ -274,6 +280,17 @@ const WaitParamsSchema = Type.Object({
 			minimum: 0,
 			description:
 				"Optional wait-window timeout in seconds. Expiry returns a live status snapshot and never stops the child. Omit to wait indefinitely; 0 returns an immediate snapshot.",
+		}),
+	),
+});
+
+const InspectParamsSchema = Type.Object({
+	agent_id: Type.String({ description: 'The direct child id to inspect (e.g. "@max").' }),
+	max_messages: Type.Optional(
+		Type.Integer({
+			minimum: 1,
+			maximum: 30,
+			description: "Number of recent child conversation messages to include. Defaults to 12.",
 		}),
 	),
 });
@@ -424,22 +441,26 @@ export default function (pi: ExtensionAPI) {
 		notify: (agent, completion) => notifyCompletion(pi, agent, completion),
 		...(!HAS_PARENT
 			? {
-					remind: (agent: Parameters<typeof notifyCompletion>[1], unsupervisedMs: number) => {
+					remind: async (agent: Parameters<typeof notifyCompletion>[1], unsupervisedMs: number) => {
 						const minutes = Math.max(1, Math.round(unsupervisedMs / 60_000));
 						const activity = activitySummary(agent.getLatestActivity?.());
+						const messages = agent.getMessages ? await agent.getMessages().catch(() => []) : [];
+						const transcript = formatTranscript(messages, { maxMessages: 4, maxChars: 4_000, perMessageChars: 1_000 });
 						pi.sendMessage(
 							{
 								customType: "subagent-supervision",
 								content:
 									`Subagent @${agent.agentId} has been running unsupervised for about ${minutes} minute${minutes === 1 ? "" : "s"}. ` +
 									`Latest activity: ${activity}. Check whether it is making sensible progress. ` +
-									"If it is fine, continue supervision with agent_wait (normally a 150-second window); otherwise steer it with agent_send or stop it. Do not use shell sleep or polling.",
+									"If it is fine, continue supervision with agent_wait (normally a 150-second window); otherwise steer it with agent_send or stop it. Do not use shell sleep or polling." +
+									`\n\nRecent transcript:\n${transcript}`,
 								display: true,
 								details: {
 									agentId: agent.agentId,
 									label: agent.label,
 									state: agent.status ?? "running",
 									activity: agent.getLatestActivity?.(),
+									transcript,
 									unsupervisedMs,
 								},
 							},
@@ -1051,6 +1072,8 @@ export default function (pi: ExtensionAPI) {
 				if (!live) return toErrorResult(`Agent ${atId(agentId)} stopped being waitable while the wait window expired.`);
 				const activity = live.getLatestActivity?.();
 				const elapsedMs = live.startedAt ? Date.now() - live.startedAt : undefined;
+				const messages = live.getMessages ? await live.getMessages().catch(() => []) : [];
+				const transcript = formatTranscript(messages, { maxMessages: 6, maxChars: 6_000, perMessageChars: 1_200 });
 				const window = timeoutSeconds === 0 ? "Status snapshot" : `Wait window of ${timeoutSeconds}s expired`;
 				return {
 					content: [
@@ -1058,7 +1081,8 @@ export default function (pi: ExtensionAPI) {
 							type: "text",
 							text:
 								`${window}; ${atId(agentId)} is still ${live.status ?? "running"}. Latest activity: ${activitySummary(activity)}. ` +
-								"The wait window did not stop the agent. If progress is sensible, wait again; otherwise steer with agent_send or stop it.",
+								"The wait window did not stop the agent. If progress is sensible, wait again; otherwise steer with agent_send or stop it." +
+								`\n\nRecent transcript:\n${transcript}`,
 						},
 					],
 					details: {
@@ -1067,6 +1091,7 @@ export default function (pi: ExtensionAPI) {
 						timedOut: timeoutSeconds !== 0,
 						timeoutSeconds,
 						activity,
+						transcript,
 						elapsedMs,
 					},
 				};
@@ -1104,6 +1129,56 @@ export default function (pi: ExtensionAPI) {
 					endedAt: Date.now(),
 				},
 				...(completion.status === "completed" ? {} : { isError: true }),
+			};
+		},
+	});
+
+	// ── agent_inspect ────────────────────────────────────
+	pi.registerTool({
+		name: "agent_inspect",
+		label: "Inspect Agent",
+		description:
+			"Read a direct child's current state and recent live Pi transcript without stopping, steering, or otherwise changing the child.",
+		promptSnippet: "Inspect a running child's recent transcript",
+		promptGuidelines: [
+			"Use agent_inspect when supervision needs more evidence than the latest activity marker. It is read-only.",
+			"Prefer the default recent tail; request more messages only when the recent context is insufficient.",
+		],
+		parameters: InspectParamsSchema,
+
+		async execute(_toolCallId, raw, _signal, _onUpdate, ctx) {
+			captureUi(ctx);
+			const params = raw as InspectParams;
+			const rawId = params.agent_id?.trim();
+			const agentId = rawId?.replace(/^@/, "");
+			if (!agentId) return toErrorResult("`agent_id` is required.");
+			const agent = registry.lookup(agentId);
+			if (!agent) return toErrorResult(`Unknown or no-longer-live direct child ${atId(agentId)}.`);
+			const maxMessages = params.max_messages ?? 12;
+			if (!Number.isInteger(maxMessages) || maxMessages < 1 || maxMessages > 30) {
+				return toErrorResult("`max_messages` must be an integer from 1 to 30.");
+			}
+			const messages = agent.getMessages ? await agent.getMessages().catch(() => []) : [];
+			const transcript = formatTranscript(messages, { maxMessages, maxChars: 20_000, perMessageChars: 2_000 });
+			const activity = agent.getLatestActivity?.();
+			const elapsedMs = agent.startedAt ? Date.now() - agent.startedAt : undefined;
+			if (!HAS_PARENT) registry.touchSupervision(agentId);
+			return {
+				content: [
+					{
+						type: "text",
+						text: `${atId(agentId)} — ${agent.status ?? "running"}; latest activity: ${activitySummary(activity)}\n\nRecent transcript:\n${transcript}`,
+					},
+				],
+				details: {
+					agentId,
+					label: agent.label,
+					state: agent.status ?? "running",
+					activity,
+					transcript,
+					elapsedMs,
+					sessionPath: agent.sessionPath,
+				},
 			};
 		},
 	});

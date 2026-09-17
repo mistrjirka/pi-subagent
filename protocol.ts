@@ -5,7 +5,7 @@
  * object per line, split on `\n` only — never on U+2028/U+2029.
  *
  * We speak only the subset of the pi rpc protocol this extension needs:
- *   prompt / abort / get_last_assistant_text / get_state / get_session_stats
+ *   prompt / abort / get_last_assistant_text / get_state / get_session_stats / get_messages
  *
  * This module is deliberately free of process/stream I/O so it can be unit
  * tested standalone. All stateful wiring lives in rpc-client.ts.
@@ -42,12 +42,17 @@ interface RpcCommandGetSessionStats {
 	type: "get_session_stats";
 }
 
+interface RpcCommandGetMessages {
+	type: "get_messages";
+}
+
 export type RpcCommand =
 	| RpcCommandPrompt
 	| RpcCommandAbort
 	| RpcCommandGetLastAssistantText
 	| RpcCommandGetState
-	| RpcCommandGetSessionStats;
+	| RpcCommandGetSessionStats
+	| RpcCommandGetMessages;
 
 // ─── Responses and events we read from stdout ──────────────
 

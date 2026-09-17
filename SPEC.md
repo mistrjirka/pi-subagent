@@ -12,3 +12,4 @@
 10. External UI integration is a direct status/steer/stop bridge only; it does not become a scheduler or workflow engine.
 11. `agent_wait` may wait indefinitely or accept a caller-chosen wait-window timeout. Expiry returns a live snapshot and never stops the child; it is not a task deadline.
 12. When the root parent ends a turn with background/resumed children still running, each gets a 3-minute fallback supervision window. A new parent turn or active wait pauses reminders; settlement/stop clears them. The reminder never terminates work.
+13. `agent_inspect` is read-only and exposes a bounded recent child transcript via Pi RPC; supervision views omit raw thinking text while retaining assistant text, tool calls and tool results.

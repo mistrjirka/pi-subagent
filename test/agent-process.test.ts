@@ -65,6 +65,24 @@ class FakeClient {
 					success: true,
 					data: { sessionFile: this.sessionFile, sessionId: this.sessionId },
 				};
+			case "get_messages":
+				return {
+					type: "response",
+					command: "get_messages",
+					success: true,
+					data: {
+						messages: [
+							{ role: "user", content: "task", timestamp: 1 },
+							{
+								role: "toolResult",
+								toolName: "read",
+								content: [{ type: "text", text: "body" }],
+								isError: false,
+								timestamp: 2,
+							},
+						],
+					},
+				};
 			case "get_session_stats":
 				return {
 					type: "response",
@@ -325,6 +343,16 @@ describe("AgentProcess — agent API errors", () => {
 
 		const completion = await completionPromise;
 		assert.equal(completion.status, "completed");
+	});
+});
+
+describe("AgentProcess — transcript", () => {
+	it("reads live messages through Pi RPC get_messages", async () => {
+		const { agent } = makeAgent({ cwd: "/tmp", label: "inspect" });
+		const messages = await agent.getMessages();
+		assert.equal(messages.length, 2);
+		assert.deepEqual((messages[0] as { role?: string }).role, "user");
+		assert.deepEqual((messages[1] as { role?: string }).role, "toolResult");
 	});
 });
 

@@ -226,6 +226,12 @@ export class AgentProcess {
 		return data?.text ?? "";
 	}
 
+	/** Live child transcript messages from Pi RPC. Read-only; safe while the child is running. */
+	async getMessages(): Promise<unknown[]> {
+		const data = await this.sendData<{ messages?: unknown[] }>({ type: "get_messages" });
+		return Array.isArray(data?.messages) ? data.messages : [];
+	}
+
 	/** Best-effort token/tool stats from get_session_stats. */
 	async getStats(): Promise<{ tokens: number; toolUses: number } | null> {
 		const data = await this.sendData<{ tokens?: { total?: number }; toolCalls?: number }>({

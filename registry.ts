@@ -40,6 +40,10 @@ export interface RegisteredAgent {
 	readonly shouldStayResident?: boolean;
 	/** Latest live activity used by wait-timeout/supervision snapshots. */
 	getLatestActivity?: () => AgentActivity | undefined;
+	/** Actual live Pi conversation messages for transcript inspection. */
+	getMessages?: () => Promise<unknown[]>;
+	/** Persisted child session file, when available. */
+	readonly sessionPath?: string;
 	/** Deliver one in-tree message to this agent (AgentProcess.sendMessage). */
 	sendMessage?: (text: string) => Promise<boolean>;
 	stoppedByControl: boolean;

@@ -43,12 +43,8 @@ type TextProjection = {
 
 function thinkingText(part: Record<string, unknown>): string | undefined {
 	const value =
-		typeof part.thinking === "string"
-			? part.thinking
-			: typeof part.text === "string"
-				? part.text
-				: undefined;
-	return value && value.trim() ? value : undefined;
+		typeof part.thinking === "string" ? part.thinking : typeof part.text === "string" ? part.text : undefined;
+	return value?.trim() ? value : undefined;
 }
 
 function contentProjection(content: unknown, includeToolCalls: boolean): TextProjection {
@@ -98,11 +94,7 @@ function contentProjection(content: unknown, includeToolCalls: boolean): TextPro
 	};
 }
 
-function expandThinking(
-	projection: TextProjection,
-	start = 0,
-	end = projection.compact.length,
-): string {
+function expandThinking(projection: TextProjection, start = 0, end = projection.compact.length): string {
 	let cursor = start;
 	let result = "";
 	for (const span of projection.thinking) {
@@ -117,8 +109,7 @@ function expandThinking(
 }
 
 function truncateProjection(projection: TextProjection, max: number): { compact: string; detailed: string } {
-	if (projection.compact.length <= max)
-		return { compact: projection.compact, detailed: expandThinking(projection) };
+	if (projection.compact.length <= max) return { compact: projection.compact, detailed: expandThinking(projection) };
 	const end = Math.max(0, max - 1);
 	return {
 		compact: `${projection.compact.slice(0, end)}…`,
@@ -312,7 +303,7 @@ export function formatRecentActivity(
 			const compact = `${prefix}[thinking]`;
 			return {
 				compact,
-				detailed: event.text && event.text.trim() ? `${compact}\n${event.text}` : compact,
+				detailed: event.text?.trim() ? `${compact}\n${event.text}` : compact,
 			};
 		}
 		if (event.kind === "tool") {

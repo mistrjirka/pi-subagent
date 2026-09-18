@@ -11,4 +11,6 @@ jobs:
         with:
           node-version: 24
       - run: npm install --ignore-scripts --no-audit --no-fund
-      - run: npm run check
+      - run: npx biome check transcript.ts test/transcript.test.ts
+      - run: npm run typecheck
+      - run: npx tsx --test test/*.test.ts

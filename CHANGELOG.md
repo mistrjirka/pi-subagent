@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.2 — visible subagent thinking text
+
+- Preserve plaintext `thinking_delta` content in the in-memory `RenderEvent` fold instead of reducing it to a marker. Consecutive chunks accumulate into one growing thinking row.
+- Foreground `agent_spawn` cards now render the actual thinking text, and background/resident widget rows show the latest accumulated thought instead of only `Thinking...`.
+- Keep supervision/agent-inspect context behavior unchanged: monitoring summaries still collapse reasoning to `[thinking]` rather than copying raw reasoning into the parent model's context.
+- Add regressions for thinking accumulation and widget rendering while preserving the generic marker fallback before text arrives.
+
 ## 0.5.1 — stop suppression race + whole-tree id uniqueness
 
 - Close the stop/complete race in `stopAndRemove`: the stopped flag is now recorded synchronously before awaiting transport shutdown, so a completion landing mid-stop observes `stoppedByControl` and stays silent instead of emitting a notification for an agent the user just stopped.

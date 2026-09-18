@@ -87,7 +87,7 @@ function doneContext(args: unknown, isError = false) {
 }
 
 const activityTool: SubagentDetails["activity"] = { kind: "tool", name: "bash", args: "sleep 20" };
-const activityThinking: SubagentDetails["activity"] = { kind: "thinking", text: "" };
+const activityThinking: SubagentDetails["activity"] = { kind: "thinking", text: "Inspecting the relevant implementation paths…" };
 
 function details(extra: Partial<SubagentDetails> = {}): SubagentDetails {
 	const st = cardState.startedAt as number;

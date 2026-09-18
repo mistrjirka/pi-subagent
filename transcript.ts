@@ -82,7 +82,20 @@ function contentProjection(content: unknown, includeToolCalls: boolean): TextPro
 			append(`[tool call] ${part.name}${args}`);
 		}
 	}
-	return { compact: compact.trim(), thinking };
+	const trimmed = compact.trim();
+	if (trimmed === compact) return { compact, thinking };
+	const leading = compact.length - compact.trimStart().length;
+	const trailingEnd = leading + trimmed.length;
+	return {
+		compact: trimmed,
+		thinking: thinking
+			.filter((span) => span.start >= leading && span.end <= trailingEnd)
+			.map((span) => ({
+				start: span.start - leading,
+				end: span.end - leading,
+				text: span.text,
+			})),
+	};
 }
 
 function expandThinking(

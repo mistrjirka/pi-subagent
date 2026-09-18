@@ -38,8 +38,8 @@ export type AgentActivity =
  * The stream fields (`text`/`contentIndex` on thinking and text_delta, plus
  * `tool_start`) are additive: the in-memory fold in AgentProcess only reads
  * the pre-existing shapes, while the `events.jsonl` appender reads the new
- * fields. `RenderEvent`/`AgentActivity` are deliberately unchanged — the card
- * and widget render markers, and block identity is a file-stream concern.
+ * fields. The human-facing card/widget may preserve the thinking chunk text;
+ * block identity remains a file-stream concern.
  */
 export type AgentEvent =
 	| { type: "settled" }

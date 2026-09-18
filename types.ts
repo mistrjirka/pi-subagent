@@ -12,13 +12,13 @@ import type { AgentActivity } from "./event-interpret.js";
 import type { NestedCounters } from "./nested-fold.js";
 
 /**
- * One step of the sub-agent's session as shown in the card body: a thinking
- * marker, a tool call, or a chunk of streamed text. The body renders these in
- * event order — like replaying the sub-agent's session in pi — instead of a
- * single latest-activity row.
+ * One step of the sub-agent's session as shown in the card body: streamed
+ * thinking text, a tool call, or a chunk of assistant text. The body renders
+ * these in event order — like replaying the sub-agent's session in pi —
+ * instead of a single latest-activity row.
  */
 export type RenderEvent =
-	| { kind: "thinking"; ts?: number }
+	| { kind: "thinking"; text?: string; ts?: number }
 	| { kind: "tool"; name: string; args?: string; id?: string; ts?: number }
 	| { kind: "text"; text: string; ts?: number };
 

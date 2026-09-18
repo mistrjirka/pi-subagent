@@ -13,7 +13,7 @@ import {
 } from "../transcript.js";
 
 describe("transcript formatting", () => {
-	it("shows user, assistant tool calls, and tool results while hiding raw thinking", () => {
+	it("shows full thinking alongside assistant text, tool calls, and tool results", () => {
 		const messages = [
 			{ role: "user", content: "implement it" },
 			{
@@ -28,10 +28,9 @@ describe("transcript formatting", () => {
 		];
 		const text = formatTranscript(messages);
 		assert.match(text, /user: implement it/);
-		assert.match(text, /assistant: \[thinking\]/);
+		assert.match(text, /assistant: \[thinking\]\nprivate chain of thought/);
 		assert.match(text, /\[tool call\] read/);
 		assert.match(text, /tool result \(read\): file body/);
-		assert.doesNotMatch(text, /private chain of thought/);
 	});
 
 	it("returns the most recent messages and marks omitted history", () => {
@@ -43,17 +42,65 @@ describe("transcript formatting", () => {
 		assert.match(text, /m7/);
 	});
 
-	it("formats a compact recent activity trail", () => {
+	it("formats a recent activity trail with full thinking text", () => {
 		const text = formatRecentActivity([
-			{ kind: "thinking" },
+			{ kind: "thinking", text: "Need to trace the owning helper first." },
 			{ kind: "tool", name: "read", args: "src/a.ts" },
 			{ kind: "text", text: "Found the owning helper." },
 			{ kind: "tool", name: "bash", args: "npm run typecheck" },
 		]);
-		assert.match(text, /\[thinking\]/);
+		assert.match(text, /\[thinking\]\nNeed to trace the owning helper first\./);
 		assert.match(text, /\[tool call\] read src\/a\.ts/);
 		assert.match(text, /assistant: Found the owning helper/);
 		assert.match(text, /npm run typecheck/);
+	});
+
+	it("raw thinking never reduces the selected tool/message rows under the same limits", () => {
+		const base = [
+			{ role: "user", content: "task" },
+			{
+				role: "assistant",
+				content: [
+					{ type: "thinking" },
+					{ type: "toolCall", name: "read", arguments: { path: "a.ts" } },
+					{ type: "toolCall", name: "grep", arguments: { q: "needle" } },
+				],
+			},
+			{ role: "toolResult", toolName: "read", content: [{ type: "text", text: "read ok" }] },
+			{ role: "toolResult", toolName: "grep", content: [{ type: "text", text: "grep ok" }] },
+		];
+		const withThinking = structuredClone(base);
+		const assistant = withThinking[1] as { content: Array<Record<string, unknown>> };
+		assistant.content[0] = { type: "thinking", thinking: "x".repeat(20_000) };
+		const options = { maxMessages: 4, maxChars: 220, perMessageChars: 180 };
+		const markerOnly = formatTranscript(base, options);
+		const detailed = formatTranscript(withThinking, options);
+		const toolEvidence = (text: string) => (text.match(/\[tool call\]|tool result/g) ?? []).length;
+		assert.equal(toolEvidence(detailed), toolEvidence(markerOnly));
+		assert.match(detailed, /x{100}/);
+		assert.match(detailed, /tool result \(grep\): grep ok/);
+	});
+
+	it("raw thinking in event fallback keeps the same tool rows under maxChars", () => {
+		const markerEvents = [
+			{ kind: "thinking" as const },
+			{ kind: "tool" as const, name: "read", args: "a.ts" },
+			{ kind: "thinking" as const },
+			{ kind: "tool" as const, name: "bash", args: "npm test" },
+		];
+		const detailedEvents = [
+			{ kind: "thinking" as const, text: "a".repeat(10_000) },
+			{ kind: "tool" as const, name: "read", args: "a.ts" },
+			{ kind: "thinking" as const, text: "b".repeat(10_000) },
+			{ kind: "tool" as const, name: "bash", args: "npm test" },
+		];
+		const markerOnly = formatRecentActivity(markerEvents, 20, 200);
+		const detailed = formatRecentActivity(detailedEvents, 20, 200);
+		const tools = (text: string) => (text.match(/\[tool call\]/g) ?? []).length;
+		assert.equal(tools(detailed), tools(markerOnly));
+		assert.match(detailed, /a{100}/);
+		assert.match(detailed, /b{100}/);
+		assert.match(detailed, /npm test/);
 	});
 
 	it("marks failed tool results", () => {
@@ -225,7 +272,7 @@ describe("transcript time formatting", () => {
 		assert.equal(
 			formatRecentActivity(
 				[
-					{ kind: "thinking", ts },
+					{ kind: "thinking", text: "checking", ts },
 					{ kind: "tool", name: "read", args: "src/a.ts", ts },
 					{ kind: "text", text: "done", ts },
 				],
@@ -234,7 +281,7 @@ describe("transcript time formatting", () => {
 				now,
 			),
 			[
-				`[${formatStamp(ts, now)}] [thinking]`,
+				`[${formatStamp(ts, now)}] [thinking]\nchecking`,
 				`[${formatStamp(ts, now)}] [tool call] read src/a.ts`,
 				`[${formatStamp(ts, now)}] assistant: done`,
 			].join("\n\n"),

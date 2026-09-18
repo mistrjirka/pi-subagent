@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.3 — full thinking in supervision traces
+
+- Show the child's actual plaintext thinking in monitoring transcripts instead of collapsing every reasoning block to `[thinking]`.
+- Apply the same transcript policy to `agent_inspect`, timed/default `agent_wait` snapshots, and the 3-minute fallback supervision reminder because all three share the same formatter.
+- Preserve the existing evidence selection exactly: transcript message/tool rows are budgeted against the old compact `[thinking]` form, then thinking text is expanded afterward, so long reasoning cannot evict tool calls or tool results from the selected window.
+- Do the same for the live-event fallback: event count and compact character selection stay unchanged while retained thinking markers expand to their plaintext content.
+- Add regressions with 10–20k-character thinking blocks proving tool/tool-result counts remain unchanged.
+
 ## 0.5.2 — visible subagent thinking text
 
 - Preserve plaintext `thinking_delta` content in the in-memory `RenderEvent` fold instead of reducing it to a marker. Consecutive chunks accumulate into one growing thinking row.

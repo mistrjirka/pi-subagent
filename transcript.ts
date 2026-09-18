@@ -6,8 +6,9 @@ import type { RenderEvent } from "./types.js";
  * Read-only transcript formatting for live subagent supervision.
  *
  * Pi RPC `get_messages` returns the child's real session messages. Monitoring
- * deliberately omits raw thinking text: user/assistant text, tool calls and
- * tool results are sufficient to judge progress without copying reasoning.
+ * preserves plaintext thinking when Pi provides it, alongside user/assistant
+ * text, tool calls and tool results. Thinking expansion is additive: it does
+ * not consume the message/tool selection budget used by supervision views.
  */
 
 export interface TranscriptFormatOptions {
@@ -33,31 +34,87 @@ function jsonCompact(value: unknown): string {
 	}
 }
 
-function contentText(content: unknown, includeToolCalls: boolean): string {
-	if (typeof content === "string") return content;
-	if (!Array.isArray(content)) return "";
-	const parts: string[] = [];
+type ThinkingSpan = { start: number; end: number; text: string };
+
+type TextProjection = {
+	compact: string;
+	thinking: ThinkingSpan[];
+};
+
+function thinkingText(part: Record<string, unknown>): string | undefined {
+	const value =
+		typeof part.thinking === "string" ? part.thinking : typeof part.text === "string" ? part.text : undefined;
+	return value?.trim() ? value : undefined;
+}
+
+function contentProjection(content: unknown, includeToolCalls: boolean): TextProjection {
+	if (typeof content === "string") return { compact: content, thinking: [] };
+	if (!Array.isArray(content)) return { compact: "", thinking: [] };
+	let compact = "";
+	const thinking: ThinkingSpan[] = [];
+	const append = (text: string, thought?: string) => {
+		if (compact) compact += "\n";
+		const start = compact.length;
+		compact += text;
+		if (thought) thinking.push({ start, end: compact.length, text: thought });
+	};
 	for (const item of content) {
 		if (!item || typeof item !== "object") continue;
 		const part = item as Record<string, unknown>;
 		if (part.type === "text" && typeof part.text === "string") {
-			parts.push(part.text);
+			append(part.text);
 			continue;
 		}
 		if (part.type === "image") {
-			parts.push("[image]");
+			append("[image]");
 			continue;
 		}
 		if (part.type === "thinking") {
-			parts.push("[thinking]");
+			append("[thinking]", thinkingText(part));
 			continue;
 		}
 		if (includeToolCalls && part.type === "toolCall" && typeof part.name === "string") {
 			const args = part.arguments === undefined ? "" : ` ${jsonCompact(part.arguments)}`;
-			parts.push(`[tool call] ${part.name}${args}`);
+			append(`[tool call] ${part.name}${args}`);
 		}
 	}
-	return parts.join("\n").trim();
+	const trimmed = compact.trim();
+	if (trimmed === compact) return { compact, thinking };
+	const leading = compact.length - compact.trimStart().length;
+	const trailingEnd = leading + trimmed.length;
+	return {
+		compact: trimmed,
+		thinking: thinking
+			.filter((span) => span.start >= leading && span.end <= trailingEnd)
+			.map((span) => ({
+				start: span.start - leading,
+				end: span.end - leading,
+				text: span.text,
+			})),
+	};
+}
+
+function expandThinking(projection: TextProjection, start = 0, end = projection.compact.length): string {
+	let cursor = start;
+	let result = "";
+	for (const span of projection.thinking) {
+		if (span.end <= start || span.start >= end) continue;
+		if (span.start < start || span.end > end) continue;
+		result += projection.compact.slice(cursor, span.start);
+		result += `[thinking]\n${span.text}`;
+		cursor = span.end;
+	}
+	result += projection.compact.slice(cursor, end);
+	return result;
+}
+
+function truncateProjection(projection: TextProjection, max: number): { compact: string; detailed: string } {
+	if (projection.compact.length <= max) return { compact: projection.compact, detailed: expandThinking(projection) };
+	const end = Math.max(0, max - 1);
+	return {
+		compact: `${projection.compact.slice(0, end)}…`,
+		detailed: `${expandThinking(projection, 0, end)}…`,
+	};
 }
 
 /**
@@ -81,33 +138,60 @@ function messageTimestampMs(message: Record<string, unknown>): number | undefine
 	);
 }
 
-export function formatTranscriptMessage(
+type TranscriptLineProjection = {
+	compact: string;
+	detailed: string;
+};
+
+function formatTranscriptMessageProjection(
 	message: unknown,
 	perMessageChars = DEFAULT_PER_MESSAGE_CHARS,
 	timestampMs?: number,
 	nowMs: number = Date.now(),
-): string | undefined {
+): TranscriptLineProjection | undefined {
 	if (!message || typeof message !== "object") return undefined;
 	const prefix =
 		timestampMs !== undefined && Number.isFinite(timestampMs) ? `[${formatStamp(timestampMs, nowMs)}] ` : "";
 	const msg = message as Record<string, unknown>;
 	const role = msg.role;
 	if (role === "user") {
-		const text = contentText(msg.content, false);
-		return text ? `${prefix}user: ${truncate(text, perMessageChars)}` : `${prefix}user: [no text]`;
+		const projection = contentProjection(msg.content, false);
+		const text = projection.compact;
+		const compact = text ? truncate(text, perMessageChars) : "[no text]";
+		return { compact: `${prefix}user: ${compact}`, detailed: `${prefix}user: ${compact}` };
 	}
 	if (role === "assistant") {
-		const text = contentText(msg.content, true);
+		const projection = contentProjection(msg.content, true);
 		const suffix = typeof msg.errorMessage === "string" && msg.errorMessage ? `\n[error] ${msg.errorMessage}` : "";
-		return `${prefix}assistant: ${truncate(text || "[no text yet]", perMessageChars)}${suffix}`;
+		if (!projection.compact) {
+			const line = `${prefix}assistant: [no text yet]${suffix}`;
+			return { compact: line, detailed: line };
+		}
+		const body = truncateProjection(projection, perMessageChars);
+		return {
+			compact: `${prefix}assistant: ${body.compact}${suffix}`,
+			detailed: `${prefix}assistant: ${body.detailed}${suffix}`,
+		};
 	}
 	if (role === "toolResult") {
 		const tool = typeof msg.toolName === "string" ? msg.toolName : "tool";
 		const error = msg.isError === true ? " ERROR" : "";
-		const text = contentText(msg.content, false);
-		return `${prefix}tool result (${tool}${error}): ${truncate(text || "[no text]", perMessageChars)}`;
+		const projection = contentProjection(msg.content, false);
+		const text = projection.compact;
+		const body = truncate(text || "[no text]", perMessageChars);
+		const line = `${prefix}tool result (${tool}${error}): ${body}`;
+		return { compact: line, detailed: line };
 	}
 	return undefined;
+}
+
+export function formatTranscriptMessage(
+	message: unknown,
+	perMessageChars = DEFAULT_PER_MESSAGE_CHARS,
+	timestampMs?: number,
+	nowMs: number = Date.now(),
+): string | undefined {
+	return formatTranscriptMessageProjection(message, perMessageChars, timestampMs, nowMs)?.detailed;
 }
 
 export function formatTranscript(
@@ -125,23 +209,26 @@ export function formatTranscript(
 			// formatTranscriptMessage only ever sees a finite epoch-ms or nothing.
 			const timestampMs =
 				message && typeof message === "object" ? messageTimestampMs(message as Record<string, unknown>) : undefined;
-			return formatTranscriptMessage(message, perMessageChars, timestampMs, nowMs);
+			return formatTranscriptMessageProjection(message, perMessageChars, timestampMs, nowMs);
 		})
-		.filter((line): line is string => Boolean(line));
+		.filter((line): line is TranscriptLineProjection => Boolean(line));
 	if (!rendered.length) return "[no transcript messages yet]";
 
-	const kept: string[] = [];
+	const kept: TranscriptLineProjection[] = [];
 	let used = 0;
 	for (let i = rendered.length - 1; i >= 0; i--) {
 		const line = rendered[i];
-		const cost = line.length + (kept.length ? 2 : 0);
+		// Budget against the compact marker form, exactly as before raw thinking
+		// became visible. Thinking expansion therefore cannot evict tool rows or
+		// change which transcript messages survive the supervision window.
+		const cost = line.compact.length + (kept.length ? 2 : 0);
 		if (kept.length && used + cost > maxChars) break;
 		kept.push(line);
 		used += cost;
 	}
 	kept.reverse();
 	const omitted = selected.length < messages.length || kept.length < rendered.length;
-	return `${omitted ? "[… earlier transcript omitted …]\n\n" : ""}${kept.join("\n\n")}`;
+	return `${omitted ? "[… earlier transcript omitted …]\n\n" : ""}${kept.map((line) => line.detailed).join("\n\n")}`;
 }
 
 export interface TranscriptReadableAgent {
@@ -207,19 +294,48 @@ export function formatRecentActivity(
 	maxChars = 4_000,
 	nowMs: number = Date.now(),
 ): string {
-	const rendered = events.slice(-maxEvents).map((event) => {
+	const projections = events.slice(-maxEvents).map((event): TranscriptLineProjection => {
 		// Events reconstructed from older data carry no ts — they render
 		// exactly as before (no empty brackets).
 		const prefix =
 			typeof event.ts === "number" && Number.isFinite(event.ts) ? `[${formatStamp(event.ts, nowMs)}] ` : "";
-		if (event.kind === "thinking") return `${prefix}[thinking]`;
-		if (event.kind === "tool") return `${prefix}[tool call] ${event.name}${event.args ? ` ${event.args}` : ""}`;
-		return `${prefix}assistant: ${event.text}`;
+		if (event.kind === "thinking") {
+			const compact = `${prefix}[thinking]`;
+			return {
+				compact,
+				detailed: event.text?.trim() ? `${compact}\n${event.text}` : compact,
+			};
+		}
+		if (event.kind === "tool") {
+			const line = `${prefix}[tool call] ${event.name}${event.args ? ` ${event.args}` : ""}`;
+			return { compact: line, detailed: line };
+		}
+		const line = `${prefix}assistant: ${event.text}`;
+		return { compact: line, detailed: line };
 	});
-	if (!rendered.length) return "[no live event transcript yet]";
-	let text = rendered.join("\n\n");
-	if (text.length > maxChars) text = `[… earlier live events omitted …]\n\n${text.slice(-maxChars)}`;
-	return text;
+	if (!projections.length) return "[no live event transcript yet]";
+
+	let compact = "";
+	const thinking: ThinkingSpan[] = [];
+	for (const projection of projections) {
+		if (compact) compact += "\n\n";
+		const offset = compact.length;
+		compact += projection.compact;
+		if (projection.detailed !== projection.compact) {
+			const marker = projection.compact.lastIndexOf("[thinking]");
+			if (marker >= 0) {
+				thinking.push({
+					start: offset + marker,
+					end: offset + marker + "[thinking]".length,
+					text: projection.detailed.slice(projection.compact.length + 1),
+				});
+			}
+		}
+	}
+	const combined: TextProjection = { compact, thinking };
+	if (compact.length <= maxChars) return expandThinking(combined);
+	const start = compact.length - maxChars;
+	return `[… earlier live events omitted …]\n\n${expandThinking(combined, start)}`;
 }
 
 export async function getMonitoringTranscript(

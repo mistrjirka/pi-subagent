@@ -389,16 +389,26 @@ export class AgentProcess {
 						this.onIdle?.(this.agentError ? "failed" : "completed");
 					}
 					break;
-				case "thinking":
-					// Collapse consecutive thinking deltas into one marker.
-					if (this.events[this.events.length - 1]?.kind !== "thinking") {
-						this.events.push({ kind: "thinking", ts: Date.now() });
-						const activity: AgentActivity = { kind: "thinking", text: "" };
-						this.latestActivity = activity;
-						this.onActivityChange?.(activity);
+				case "thinking": {
+					// Preserve plaintext reasoning deltas for the human-facing card/widget.
+					// Consecutive chunks stay one event so the card grows in place rather
+					// than adding one row per token.
+					const chunk = ev.text ?? "";
+					const last = this.events[this.events.length - 1];
+					if (last?.kind === "thinking") {
+						last.text = (last.text ?? "") + chunk;
+					} else {
+						this.events.push({ kind: "thinking", text: chunk, ts: Date.now() });
 					}
+					const activity: AgentActivity = {
+						kind: "thinking",
+						text: last?.kind === "thinking" ? (last.text ?? "") : chunk,
+					};
+					this.latestActivity = activity;
+					this.onActivityChange?.(activity);
 					this.onStream?.(ev);
 					break;
+				}
 				case "tool_start":
 					// Stream-only: the fold waits for toolcall_end (authoritative args).
 					this.onStream?.(ev);

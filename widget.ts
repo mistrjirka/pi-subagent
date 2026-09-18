@@ -107,7 +107,7 @@ export class AgentWidget {
  *  zero-width-\n over-wide collapse impossible). */
 export function activityToRows(activity: AgentActivity | undefined): WidgetRow[] {
 	if (!activity) return [];
-	if (activity.kind === "thinking") return [{ style: "thinking", content: "Thinking..." }];
+	if (activity.kind === "thinking") return [{ style: "thinking", content: activity.text.trim() ? activity.text : "Thinking..." }];
 	// Tool args can carry multi-line payloads (e.g. write) — flatten newlines
 	// into a single excerpt line (tail truncation happens at render time).
 	if (activity.kind === "tool")

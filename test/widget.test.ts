@@ -25,6 +25,16 @@ describe("activityToRows — pure data (width clipping lives in the widget rende
 		const rows = activityToRows({ kind: "text", text: "y".repeat(1000) });
 		assert.equal(rows[0]?.content, "y".repeat(1000));
 	});
+
+	it("shows actual thinking text instead of a generic marker", () => {
+		const rows = activityToRows({ kind: "thinking", text: "Checking the ownership boundary." });
+		assert.deepEqual(rows, [{ style: "thinking", content: "Checking the ownership boundary." }]);
+	});
+
+	it("falls back to the generic thinking marker only before text arrives", () => {
+		const rows = activityToRows({ kind: "thinking", text: "" });
+		assert.deepEqual(rows, [{ style: "thinking", content: "Thinking..." }]);
+	});
 });
 
 // ── Removal cascade ──────────────────────────────────────

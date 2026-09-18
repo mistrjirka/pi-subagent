@@ -158,7 +158,7 @@ class FakeClient {
 
 /** RenderEvent minus the fold timestamp (timestamps are asserted separately). */
 function eventShape(event: RenderEvent): unknown {
-	if (event.kind === "thinking") return { kind: "thinking" };
+	if (event.kind === "thinking") return { kind: "thinking", text: event.text ?? "" };
 	if (event.kind === "tool")
 		return { kind: "tool", name: event.name, args: event.args, ...(event.id === undefined ? {} : { id: event.id }) };
 	return { kind: "text", text: event.text };
@@ -434,7 +434,7 @@ describe("AgentProcess — latest activity", () => {
 		});
 
 		assert.deepEqual(events, [
-			{ kind: "thinking", text: "" },
+			{ kind: "thinking", text: "analyzing…" },
 			{ kind: "tool", name: "bash", args: "ls" },
 		]);
 	});
@@ -443,7 +443,7 @@ describe("AgentProcess — latest activity", () => {
 		const events: AgentActivity[] = [];
 		const { agent, fake } = makeAgent({ cwd: "/tmp", onActivityChange: (a) => events.push(a) });
 
-		// Two thinking_delta deltas → one thinking marker (dedup).
+		// Two thinking_delta deltas → one growing thinking row.
 		fake.emitEvent({ type: "message_update", assistantMessageEvent: { type: "thinking_delta", delta: "one" } });
 		fake.emitEvent({ type: "message_update", assistantMessageEvent: { type: "thinking_delta", delta: "two" } });
 		// Two bash calls → two tool rows, both recorded.
@@ -457,7 +457,8 @@ describe("AgentProcess — latest activity", () => {
 		});
 
 		assert.deepEqual(events, [
-			{ kind: "thinking", text: "" },
+			{ kind: "thinking", text: "one" },
+			{ kind: "thinking", text: "onetwo" },
 			{ kind: "tool", name: "read", args: "a.ts" },
 			{ kind: "tool", name: "read", args: "b.ts" },
 		]);
@@ -491,7 +492,7 @@ describe("AgentProcess — latest activity", () => {
 		});
 
 		assert.deepEqual(agent.getEvents().map(eventShape), [
-			{ kind: "thinking" },
+			{ kind: "thinking", text: "reasoning..." },
 			{ kind: "tool", name: "bash", args: "ls" },
 			{ kind: "text", text: "hello world" },
 		]);

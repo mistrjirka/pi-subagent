@@ -101,7 +101,7 @@ export const spawnView = createToolView<Record<string, unknown>, SubagentDetails
 					content: (_ctx, ev) => {
 						const e = ev as { kind: string; name?: string; args?: string; text?: string };
 						if (e.kind === "prompt") return { style: "muted", content: e.text ?? "" };
-						if (e.kind === "thinking") return { style: "thinking", content: "Thinking..." };
+						if (e.kind === "thinking") return { style: "thinking", content: e.text?.trim() ? e.text : "Thinking..." };
 						if (e.kind === "tool") return { style: "tool", content: `${e.name ?? ""}: ${e.args ?? ""}` };
 						return { style: "text", content: e.text ?? "" };
 					},

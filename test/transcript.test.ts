@@ -13,7 +13,7 @@ import {
 } from "../transcript.js";
 
 describe("transcript formatting", () => {
-	it("shows user, assistant tool calls, and tool results while hiding raw thinking", () => {
+	it("shows user, full thinking, assistant tool calls, and tool results", () => {
 		const messages = [
 			{ role: "user", content: "implement it" },
 			{
@@ -28,10 +28,9 @@ describe("transcript formatting", () => {
 		];
 		const text = formatTranscript(messages);
 		assert.match(text, /user: implement it/);
-		assert.match(text, /assistant: \[thinking\]/);
+		assert.match(text, /assistant: \[thinking\]\nprivate chain of thought/);
 		assert.match(text, /\[tool call\] read/);
 		assert.match(text, /tool result \(read\): file body/);
-		assert.doesNotMatch(text, /private chain of thought/);
 	});
 
 	it("returns the most recent messages and marks omitted history", () => {
@@ -43,14 +42,63 @@ describe("transcript formatting", () => {
 		assert.match(text, /m7/);
 	});
 
-	it("formats a compact recent activity trail", () => {
+	it("adds full thinking without reducing the tool calls kept by the old budgets", () => {
+		const huge = "reason ".repeat(4_000);
+		const messages = [
+			{
+				role: "assistant",
+				content: [
+					{ type: "thinking", thinking: huge },
+					{ type: "toolCall", name: "read", arguments: { path: "a.ts" } },
+				],
+			},
+			{ role: "toolResult", toolName: "read", content: [{ type: "text", text: "ok" }] },
+			{
+				role: "assistant",
+				content: [
+					{ type: "thinking", thinking: huge },
+					{ type: "toolCall", name: "bash", arguments: { command: "npm test" } },
+				],
+			},
+			{ role: "toolResult", toolName: "bash", content: [{ type: "text", text: "pass" }] },
+		];
+		const text = formatTranscript(messages, {
+			maxMessages: 4,
+			maxChars: 512,
+			perMessageChars: 256,
+		});
+		assert.equal((text.match(/\[tool call\]/g) ?? []).length, 2);
+		assert.equal((text.match(/tool result \(/g) ?? []).length, 2);
+		assert.equal((text.match(/\[thinking\]/g) ?? []).length, 2);
+		assert.match(text, /reason reason reason/);
+	});
+
+	it("keeps the same recent-activity tool rows when thinking becomes large", () => {
+		const text = formatRecentActivity(
+			[
+				{ kind: "thinking", text: "deep ".repeat(2_000) },
+				{ kind: "tool", name: "read", args: "a.ts" },
+				{ kind: "thinking", text: "more ".repeat(2_000) },
+				{ kind: "tool", name: "bash", args: "npm test" },
+			],
+			20,
+			180,
+		);
+		assert.equal((text.match(/\[tool call\]/g) ?? []).length, 2);
+		assert.match(text, /\[tool call\] read a\.ts/);
+		assert.match(text, /\[tool call\] bash npm test/);
+		assert.match(text, /deep deep/);
+		assert.match(text, /more more/);
+	});
+
+	it("formats a compact recent activity trail with full thinking text", () => {
 		const text = formatRecentActivity([
-			{ kind: "thinking" },
+			{ kind: "thinking", text: "Need to inspect the owning helper first." },
 			{ kind: "tool", name: "read", args: "src/a.ts" },
 			{ kind: "text", text: "Found the owning helper." },
 			{ kind: "tool", name: "bash", args: "npm run typecheck" },
 		]);
-		assert.match(text, /\[thinking\]/);
+		assert.match(text, /\[thinking\]\nNeed to inspect the owning helper first\./);
 		assert.match(text, /\[tool call\] read src\/a\.ts/);
 		assert.match(text, /assistant: Found the owning helper/);
 		assert.match(text, /npm run typecheck/);
@@ -113,15 +161,17 @@ describe("monitoring transcript fallbacks", () => {
 		}
 	});
 
-	it("falls back to the live event trace when messages are empty", async () => {
+	it("falls back to the live event trace with thinking text when messages are empty", async () => {
 		const snapshot = await getMonitoringTranscript({
 			getMessages: async () => [],
 			getEvents: () => [
+				{ kind: "thinking", text: "Checking whether the build is the right next step." },
 				{ kind: "text", text: "Checking build." },
 				{ kind: "tool", name: "bash", args: "npm run typecheck" },
 			],
 		});
 		assert.equal(snapshot.source, "events");
+		assert.match(snapshot.text, /Checking whether the build is the right next step/);
 		assert.match(snapshot.text, /Checking build/);
 		assert.match(snapshot.text, /npm run typecheck/);
 	});
@@ -241,7 +291,7 @@ describe("transcript time formatting", () => {
 		);
 	});
 
-	it("leaves activity lines unchanged when ts is absent", () => {
+	it("leaves marker-only activity unchanged when thinking text is unavailable", () => {
 		assert.equal(
 			formatRecentActivity([
 				{ kind: "thinking" },

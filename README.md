@@ -302,7 +302,7 @@ Read a live direct child's state and recent Pi conversation transcript without c
 { "agent_id": "@max", "max_messages": 12 }
 ```
 
-The preferred transcript source is Pi RPC `get_messages`. If that RPC fails or is temporarily empty, monitoring falls back to the persisted child session and then to the live event stream, and reports which source was used instead of silently presenting an RPC failure as an empty transcript. The transcript includes user/parent follow-ups, assistant text, tool calls and tool results when available; the event fallback contains assistant/tool activity but cannot reconstruct past tool-result bodies. Raw thinking text is deliberately omitted from the monitoring view. `max_messages` defaults to 12 and may be 1–30.
+The preferred transcript source is Pi RPC `get_messages`. If that RPC fails or is temporarily empty, monitoring falls back to the persisted child session and then to the live event stream, and reports which source was used instead of silently presenting an RPC failure as an empty transcript. The transcript includes user/parent follow-ups, plaintext thinking when the provider exposes it, assistant text, tool calls and tool results when available; the event fallback contains thinking/assistant/tool activity but cannot reconstruct past tool-result bodies. Thinking is additive to the existing compact transcript budget, so enabling it does not reduce the number of tool calls/results shown by the same `max_messages`/character limits. `max_messages` defaults to 12 and may be 1–30.
 
 Use `agent_inspect` when a wait-window snapshot is not enough to decide whether the child is making sensible progress. It is read-only and does not pause, steer, resume, or stop the child.
 

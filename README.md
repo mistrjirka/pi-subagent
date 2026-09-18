@@ -7,7 +7,7 @@ The runtime deliberately does very little orchestration. The **parent Pi decides
 ## Design
 
 - **No task caps.** No tool-call budget, token budget, turn budget, wall-clock deadline, concurrency ceiling, or nesting-depth ceiling.
-- **No predefined roles.** Agent types are Markdown files you own.
+- **No hardcoded workflow.** Roles come from the optional package bundle (enabled by default) plus Markdown files you own.
 - **No fallback agent.** An unknown agent name is an error.
 - **Plain-text results.** A subagent finishes with ordinary assistant text. There is no required JSON/Zod/structured-output schema.
 - **All normal Pi tools.** The runtime does not impose per-agent tool allowlists.
@@ -22,14 +22,99 @@ The only forced termination paths are an explicit `agent_stop`, a user/parent ab
 
 ## Agent profiles
 
-Profiles are discovered from:
+Profiles are discovered in this order:
 
 ```text
+bundled profiles shipped with this package
 ~/.pi/agent/agents/*.md
 <project>/.pi/agents/*.md
 ```
 
-A project profile overrides a global profile with the same exact `name`.
+A later source overrides an earlier one by the exact `name` field: a global
+custom profile wins over a same-name bundled profile, and a project custom
+profile wins over both. User profiles are always loaded; the `builtinAgents`
+setting below only selects which bundled profiles ship alongside them.
+
+### Bundled profiles
+
+With no setting, these three core profiles are available everywhere:
+
+| Profile | Delegation | Role |
+| --- | --- | --- |
+| `explore` | none | Read-only first-pass investigation of an unfamiliar area, reported with concrete evidence. |
+| `implementer` | `explore` | Carries out a scoped implementation task and runs a focused check that it holds together. |
+| `debugging-duck` | `explore` | Read-only evidence-based diagnosis of a reported failure, with concrete next steps. |
+
+Setting `builtinAgents` to `"all"` adds these six read-only profiles (none of
+them delegates to another agent):
+
+| Profile | Role |
+| --- | --- |
+| `feasibility` | Research into whether a proposed approach can work, backed by project sources. |
+| `implementation-review` | Direct review of a completed change, reporting concrete actionable findings. |
+| `impl-check-behavior` | Review of the observable behavior of a change against its stated intent. |
+| `impl-check-contracts` | Review that a change honors the interfaces and data shapes it touches. |
+| `impl-check-design` | Review of how a change fits the surrounding structure and conventions. |
+| `impl-check-runtime` | Review of the runtime consequences of a change, from startup to failure modes. |
+
+The bundled prompts are written to apply to any kind of repository — source,
+configuration, documentation, or other material. They set no model or provider;
+model and thinking resolve exactly as for custom profiles (see below).
+
+### Choosing the bundle: `builtinAgents`
+
+Under `subagentProfiles` in `~/.pi/agent/settings.json` or
+`<project>/.pi/settings.json`:
+
+| Value | Effect |
+| --- | --- |
+| omitted or `"default"` | Load the bundled `explore`, `implementer`, and `debugging-duck` profiles. |
+| `"none"` | Load no bundled profile — only the global and project custom Markdown profiles. |
+| `"all"` | Load the default trio plus all six extended bundled profiles. |
+
+Any other value is ignored — the discovery result carries a warning naming
+the settings file and the invalid value. The `"default"` bundle applies
+only when no valid scope supplies a mode. Project `builtinAgents` overrides
+global `builtinAgents`, matching the existing scope convention for profile
+settings.
+
+Custom-only setup (no bundled profiles, just your own files):
+
+```json
+{
+  "subagentProfiles": {
+    "builtinAgents": "none"
+  }
+}
+```
+
+Full bundle:
+
+```json
+{
+  "subagentProfiles": {
+    "builtinAgents": "all"
+  }
+}
+```
+
+Overriding a bundled profile with your own file keeps the rest of the bundle.
+For example, to replace the bundled `explore` globally, add
+`~/.pi/agent/agents/explore.md` with the same `name: explore` — your prompt
+and `allowed_subagents` win for that name, and the other bundled profiles keep
+loading. A project file at `<project>/.pi/agents/explore.md` would in turn win
+over the global one.
+
+### Custom profiles
+
+Your own Markdown profiles live in the two user locations from the discovery
+order above. This runtime reads the Markdown body plus these frontmatter fields:
+
+- `name`
+- `description`
+- `model`
+- `thinking`
+- `allowed_subagents`
 
 Example implementer:
 
@@ -85,7 +170,7 @@ allowed_subagents: []
 Review the supplied change. Report concrete findings as normal text. The parent decides what to do with them.
 ```
 
-With those profiles the delegation graph is:
+With the default bundle plus that custom reviewer, the delegation graph is:
 
 ```text
 root -> any configured agent
@@ -95,7 +180,7 @@ explore -> none
 reviewer -> none
 ```
 
-Nothing is hardcoded about those names. Change `allowed_subagents` in the Markdown files to change the graph.
+Nothing is hardcoded about the custom names. Change `allowed_subagents` in the Markdown files to change the graph.
 
 ## Migrating from `pi-subagents`
 

@@ -229,7 +229,8 @@ interface AskParentParams {
 }
 
 const SpawnAgentField = Type.String({
-	description: "Exact name of a configured agent profile from ~/.pi/agent/agents or .pi/agents.",
+	description:
+		'Exact name of a configured agent profile: a bundled profile (explore, implementer, debugging-duck by default, plus extended profiles when builtinAgents is "all") or a custom profile from ~/.pi/agent/agents or .pi/agents.',
 });
 const SpawnPromptField = Type.String({
 	description: "The delegated task. Role instructions come from the agent profile and do not need to be repeated here.",

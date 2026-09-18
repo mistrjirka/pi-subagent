@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.5.0 — portable bundled agent profiles
+
+- Ship nine package-owned Markdown profiles under `builtin-agents/core` and
+  `builtin-agents/extended`, included in the published artifact via the
+  `package.json` `files` entry so they survive packing.
+- Load bundled profiles first, then global user profiles, then project user
+  profiles: a custom profile at either user location overrides a same-name
+  bundled profile, and a project custom profile overrides both.
+- Add the `subagentProfiles.builtinAgents` setting with three exact string
+  modes: omitted or `"default"` loads bundled `explore`, `implementer`, and
+  `debugging-duck`; `"none"` loads no bundled profile (custom-only mode);
+  `"all"` loads the default trio plus bundled `feasibility`,
+  `implementation-review`, `impl-check-behavior`, `impl-check-contracts`,
+  `impl-check-design`, and `impl-check-runtime`. Invalid values are ignored
+  with a catalog warning naming the settings file; the default applies only
+  when no valid scope supplies a mode. Project `builtinAgents` overrides
+  global `builtinAgents`.
+- Keep existing behavior otherwise: malformed-file warnings, exact
+  `allowed_subagents` enforcement, and model/thinking precedence are
+  unchanged, and the bundled prompts set no model or provider.
+
 ## 0.4.7 — plain supervision wording
 
 - Replace the HEALTHY / STALLED / DRIFTING taxonomy in the supervision texts with a plain progress check: is the child making real progress on its task, and if it looks stuck, is repeating itself, or has wandered off the task, steer it with `agent_send`, inspect it, or stop it.

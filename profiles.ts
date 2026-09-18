@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 
 const THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
@@ -20,9 +21,41 @@ interface AgentRuntimeOverride {
 	thinking?: string;
 }
 
+export type BuiltinAgentsMode = "default" | "none" | "all";
+
+/** Bundled profiles loaded when `builtinAgents` is omitted or `"default"`. */
+export const BUILTIN_CORE_PROFILE_NAMES = ["explore", "implementer", "debugging-duck"] as const;
+
+/** Additional bundled profiles loaded only when `builtinAgents` is `"all"`. */
+export const BUILTIN_EXTENDED_PROFILE_NAMES = [
+	"feasibility",
+	"implementation-review",
+	"impl-check-behavior",
+	"impl-check-contracts",
+	"impl-check-design",
+	"impl-check-runtime",
+] as const;
+
+const BUILTIN_MODES: ReadonlySet<string> = new Set(["default", "none", "all"]);
+
+function isBuiltinAgentsMode(value: unknown): value is BuiltinAgentsMode {
+	return typeof value === "string" && BUILTIN_MODES.has(value);
+}
+
+function packageDir(): string {
+	return path.dirname(fileURLToPath(import.meta.url));
+}
+
 interface SubagentProfileSettings {
 	defaults?: AgentRuntimeOverride;
 	agents?: Record<string, AgentRuntimeOverride>;
+	builtinAgents?: BuiltinAgentsMode;
+}
+
+/** One settings file plus a warning when its `builtinAgents` value is invalid. */
+interface SettingsFile {
+	settings: SubagentProfileSettings;
+	builtinAgentsWarning?: string;
 }
 
 export interface ResolvedAgentProfile extends AgentProfile {
@@ -140,14 +173,71 @@ function loadScope(directory: string): { profiles: AgentProfile[]; warnings: str
 	return { profiles, warnings };
 }
 
-/** Discover global agents first, then let project .pi/agents override by exact name. */
+/**
+ * Pick the bundled-profile mode from the two settings scopes. Project
+ * `builtinAgents` overrides global `builtinAgents`; an omitted or invalid
+ * value in both scopes falls back to `"default"`. Invalid values are kept
+ * as warnings so the ignore is visible instead of silent.
+ */
+function selectBuiltinAgentsMode(
+	globalFile: SettingsFile,
+	projectFile: SettingsFile,
+): { mode: BuiltinAgentsMode; warnings: string[] } {
+	const warnings: string[] = [];
+	if (globalFile.builtinAgentsWarning) warnings.push(globalFile.builtinAgentsWarning);
+	if (projectFile.builtinAgentsWarning) warnings.push(projectFile.builtinAgentsWarning);
+	return {
+		mode: projectFile.settings.builtinAgents ?? globalFile.settings.builtinAgents ?? "default",
+		warnings,
+	};
+}
+
+function readSettingsFiles(cwd: string): { globalFile: SettingsFile; projectFile: SettingsFile } {
+	return {
+		globalFile: readSettingsFile(path.join(agentDir(), "settings.json")),
+		projectFile: readSettingsFile(path.join(cwd, ".pi", "settings.json")),
+	};
+}
+
+/**
+ * Resolve the bundled-profile mode for a project. Project `builtinAgents`
+ * overrides global `builtinAgents`; an omitted or invalid value in both scopes
+ * falls back to `"default"`.
+ */
+export function resolveBuiltinAgentsMode(cwd: string): BuiltinAgentsMode {
+	const { globalFile, projectFile } = readSettingsFiles(cwd);
+	return selectBuiltinAgentsMode(globalFile, projectFile).mode;
+}
+
+function loadBuiltinProfiles(mode: BuiltinAgentsMode): { profiles: AgentProfile[]; warnings: string[] } {
+	if (mode === "none") return { profiles: [], warnings: [] };
+	const core = loadScope(path.join(packageDir(), "builtin-agents", "core"));
+	if (mode === "default") return core;
+	const extended = loadScope(path.join(packageDir(), "builtin-agents", "extended"));
+	return { profiles: [...core.profiles, ...extended.profiles], warnings: [...core.warnings, ...extended.warnings] };
+}
+
+/**
+ * Discover bundled profiles first, then global user profiles, then project
+ * user profiles. A later scope overrides an earlier one by exact agent name,
+ * so a custom profile at either user location wins over a same-name bundled
+ * profile, and a project custom profile wins over both. `"none"` suppresses
+ * only bundled files; user profiles always load.
+ */
 export function discoverAgentProfiles(cwd: string): ProfileCatalog {
+	const { globalFile, projectFile } = readSettingsFiles(cwd);
+	const selection = selectBuiltinAgentsMode(globalFile, projectFile);
+	const builtinScope = loadBuiltinProfiles(selection.mode);
 	const globalScope = loadScope(path.join(agentDir(), "agents"));
 	const projectScope = loadScope(path.join(cwd, ".pi", "agents"));
 	const profiles = new Map<string, AgentProfile>();
+	for (const profile of builtinScope.profiles) profiles.set(profile.name, profile);
 	for (const profile of globalScope.profiles) profiles.set(profile.name, profile);
 	for (const profile of projectScope.profiles) profiles.set(profile.name, profile);
-	return { profiles, warnings: [...globalScope.warnings, ...projectScope.warnings] };
+	return {
+		profiles,
+		warnings: [...selection.warnings, ...builtinScope.warnings, ...globalScope.warnings, ...projectScope.warnings],
+	};
 }
 
 function runtimeOverride(value: unknown): AgentRuntimeOverride | undefined {
@@ -162,12 +252,12 @@ function runtimeOverride(value: unknown): AgentRuntimeOverride | undefined {
 	};
 }
 
-function readProfileSettings(filePath: string): SubagentProfileSettings {
+function readSettingsFile(filePath: string): SettingsFile {
 	try {
 		const root = JSON.parse(fs.readFileSync(filePath, "utf8")) as unknown;
-		if (!root || typeof root !== "object" || Array.isArray(root)) return {};
+		if (!root || typeof root !== "object" || Array.isArray(root)) return { settings: {} };
 		const namespace = (root as Record<string, unknown>).subagentProfiles;
-		if (!namespace || typeof namespace !== "object" || Array.isArray(namespace)) return {};
+		if (!namespace || typeof namespace !== "object" || Array.isArray(namespace)) return { settings: {} };
 		const raw = namespace as Record<string, unknown>;
 		const defaults = runtimeOverride(raw.defaults);
 		const agentsRaw = raw.agents;
@@ -178,12 +268,22 @@ function readProfileSettings(filePath: string): SubagentProfileSettings {
 				if (parsed) agents[name] = parsed;
 			}
 		}
+		const builtinRaw: unknown = raw.builtinAgents;
+		const builtinAgents: BuiltinAgentsMode | undefined = isBuiltinAgentsMode(builtinRaw) ? builtinRaw : undefined;
+		const builtinAgentsWarning =
+			builtinRaw === undefined || builtinAgents !== undefined
+				? undefined
+				: `${filePath}: invalid subagentProfiles.builtinAgents ${JSON.stringify(builtinRaw)}; expected "default", "none", or "all" — ignoring invalid value.`;
 		return {
-			...(defaults ? { defaults } : {}),
-			...(Object.keys(agents).length ? { agents } : {}),
+			settings: {
+				...(defaults ? { defaults } : {}),
+				...(Object.keys(agents).length ? { agents } : {}),
+				...(builtinAgents ? { builtinAgents } : {}),
+			},
+			...(builtinAgentsWarning ? { builtinAgentsWarning } : {}),
 		};
 	} catch {
-		return {};
+		return { settings: {} };
 	}
 }
 
@@ -193,8 +293,8 @@ function readProfileSettings(filePath: string): SubagentProfileSettings {
  * only fill fields the profile did not pin. Project settings override global.
  */
 export function resolveAgentProfile(profile: AgentProfile, cwd: string): ResolvedAgentProfile {
-	const globalSettings = readProfileSettings(path.join(agentDir(), "settings.json"));
-	const projectSettings = readProfileSettings(path.join(cwd, ".pi", "settings.json"));
+	const globalSettings = readSettingsFile(path.join(agentDir(), "settings.json")).settings;
+	const projectSettings = readSettingsFile(path.join(cwd, ".pi", "settings.json")).settings;
 	const globalAgent = globalSettings.agents?.[profile.name];
 	const projectAgent = projectSettings.agents?.[profile.name];
 	const resolvedModel =

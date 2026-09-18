@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.1 — stop suppression race + whole-tree id uniqueness
+
+- Close the stop/complete race in `stopAndRemove`: the stopped flag is now recorded synchronously before awaiting transport shutdown, so a completion landing mid-stop observes `stoppedByControl` and stays silent instead of emitting a notification for an agent the user just stopped.
+- Guarantee whole-tree agent-id uniqueness: the spawner passes its ancestor id chain (`PI_SUBAGENT_ANCESTOR_IDS`) through the existing child identity env, and each child registry seeds its used-name set from it — a nested grandchild can no longer re-roll an ancestor or cousin name. Consumers rendering the whole tree keyed by bare id (PiTTy does) no longer see two different agents under one id. Absent or malformed env values keep exactly the previous behavior.
+- Correct the `name-gen` header, which previously claimed cross-process collision was harmless.
+
 ## 0.5.0 — portable bundled agent profiles
 
 - Ship nine package-owned Markdown profiles under `builtin-agents/core` and

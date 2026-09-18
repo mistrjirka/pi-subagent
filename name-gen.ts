@@ -7,10 +7,12 @@
  * no hard length cap — the pool is simply short, common first names/nicknames
  * (most are a single token in practice).
  *
- * Uniqueness is per-process: the registry keeps a used-set and re-rolls on
- * collision. Cross-process collision is irrelevant — agents are addressed
- * only within their own tree, and the pool (~200) makes random collisions
- * between independent trees harmless.
+ * Uniqueness starts per-process: the registry keeps a used-set and re-rolls
+ * on collision. Cross-process collision is NOT harmless — any consumer
+ * rendering the whole tree keyed by bare id confuses two same-named agents
+ * (observed: a nested child Pi process re-rolled its parent's name), so the
+ * spawner propagates its ancestor id chain (PI_SUBAGENT_ANCESTOR_IDS) and
+ * the child seeds its registry's used-set from it (see registry.ts).
  */
 
 /** Short first-name / nickname pool (no hard length rule, naturally terse). */

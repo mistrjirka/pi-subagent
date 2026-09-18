@@ -686,9 +686,15 @@ describe("AgentProcess — persistent / in-tree messages", () => {
 	});
 
 	it("identity env is passed to the child", () => {
-		const { fake } = makeAgent({ cwd: "/tmp", env: { PI_SUBAGENT_AGENT_ID: "a1", PI_SUBAGENT_PARENT: "" } });
+		const { fake } = makeAgent({
+			cwd: "/tmp",
+			env: { PI_SUBAGENT_AGENT_ID: "a1", PI_SUBAGENT_PARENT: "", PI_SUBAGENT_ANCESTOR_IDS: "a1" },
+		});
 		assert.ok(fake.env);
 		assert.equal(fake.env.PI_SUBAGENT_AGENT_ID, "a1");
+		// Ancestor id chain travels on the same channel so the child's
+		// registry never re-rolls an ancestor/cousin name.
+		assert.equal(fake.env.PI_SUBAGENT_ANCESTOR_IDS, "a1");
 	});
 });
 

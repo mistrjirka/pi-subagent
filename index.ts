@@ -53,7 +53,7 @@ import {
 	resolveAgentProfile,
 } from "./profiles.js";
 import { type AgentMessage, type AgentQuestion, formatFrom } from "./protocol.js";
-import { AgentRegistry, type AgentSettlement, type WidgetSurface } from "./registry.js";
+import { AgentRegistry, type AgentSettlement, buildAncestorChain, type WidgetSurface } from "./registry.js";
 import { renderNotification } from "./render.js";
 import { runSpawnSession, type SpawnOutcome } from "./spawn-session.js";
 import { formatRecentActivity, getMonitoringTranscript } from "./transcript.js";
@@ -715,6 +715,9 @@ export default function (pi: ExtensionAPI) {
 						PI_SUBAGENT_PROFILE: profile.name,
 						PI_SUBAGENT_ALLOWED_SUBAGENTS: JSON.stringify(profile.allowedSubagents),
 						PI_SUBAGENT_TREE_ID: AGENT_TREE_ID,
+						// Ancestor id chain so the child's registry never re-rolls
+						// an ancestor/cousin name (whole-tree bare-id uniqueness).
+						PI_SUBAGENT_ANCESTOR_IDS: buildAncestorChain(agentId, MY_AGENT_ID, process.env.PI_SUBAGENT_ANCESTOR_IDS),
 					},
 					// Child→parent messages re-enter the router on this hop. Tree telemetry
 					// from deeper spawns forwards up (depth + 1) or lands on the root widget.

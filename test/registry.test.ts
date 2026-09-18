@@ -11,7 +11,14 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { AgentCompletion } from "../agent-process.js";
 import type { AgentMessage } from "../protocol.js";
-import { AgentRegistry, type RegisteredAgent, type WidgetSurface } from "../registry.js";
+import {
+	AgentRegistry,
+	ANCESTOR_IDS_ENV,
+	buildAncestorChain,
+	parseAncestorIds,
+	type RegisteredAgent,
+	type WidgetSurface,
+} from "../registry.js";
 
 // ── Fakes ──────────────────────────────────────────────────
 
@@ -521,6 +528,32 @@ describe("AgentRegistry — stop / shutdown", () => {
 		assert.equal(stopped, false);
 	});
 
+	it("a completion landing mid-stop is suppressed (stop/complete race)", async () => {
+		const { registry, notified } = makeRegistry();
+		const agent = new FakeAgent("a1");
+		// Deferred transport shutdown: stop() stays pending until released,
+		// so the completion below provably lands inside the stop window.
+		let release!: () => void;
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const origStop = agent.stop.bind(agent);
+		agent.stop = async () => {
+			await gate;
+			await origStop();
+		};
+		registry.register(agent);
+
+		const stopping = registry.stopAndRemove("a1");
+		await Promise.resolve(); // let stopAndRemove reach the pending stop()
+		const completed = registry.complete(agent, completion({ status: "completed" }));
+		release();
+		assert.equal(await stopping, true);
+		await completed;
+
+		assert.deepEqual(notified, [], "stop had started: the late completion must stay silent");
+	});
+
 	it("shutdown stops every agent, clears the map, and disposes the widget", async () => {
 		const { registry, widget } = makeRegistry();
 		const a1 = new FakeAgent("a1");
@@ -604,5 +637,58 @@ describe("AgentRegistry — explicit stop is terminal for the control bridge", (
 
 		assert.equal(await registry.stopAndRemove("a1"), true);
 		assert.equal(agent.status, "failed", "failed stays failed (already terminal)");
+	});
+});
+
+describe("AgentRegistry — ancestor id seeding (cross-process collisions)", () => {
+	it("parses the chain: dedupes, drops malformed, absent is empty", () => {
+		assert.deepEqual(parseAncestorIds(undefined), []);
+		assert.deepEqual(parseAncestorIds(""), []);
+		assert.deepEqual(parseAncestorIds("eva,max,eva"), ["eva", "max"]);
+		assert.deepEqual(parseAncestorIds(" eva , max "), ["eva", "max"]);
+		// Sane charset only: uppercase, digits, spaces, empty segments dropped.
+		assert.deepEqual(parseAncestorIds("Eva, eva!, ,a1,xx yy,"), []);
+	});
+
+	it("builds the child chain: own id first, then this process, then inherited", () => {
+		assert.equal(buildAncestorChain("kai", "eva", "max,zoe"), "kai,eva,max,zoe");
+		assert.equal(buildAncestorChain("kai", "", undefined), "kai");
+		assert.equal(buildAncestorChain("eva", "eva", "eva,max"), "eva,max");
+		assert.equal(buildAncestorChain("kai", "EVA", "max"), "kai,max");
+	});
+
+	it("a registry seeded via the env chain never re-rolls a reserved name", () => {
+		const prevEnv = process.env[ANCESTOR_IDS_ENV];
+		const prevRandom = Math.random;
+		try {
+			// Pin the RNG to one pool slot: without seeding every roll would
+			// return the same name, so any other outcome proves the seed.
+			delete process.env[ANCESTOR_IDS_ENV];
+			Math.random = () => 0;
+			const pinned = new AgentRegistry({ notify: () => {} }).nextAgentId();
+
+			process.env[ANCESTOR_IDS_ENV] = pinned;
+			const seeded = new AgentRegistry({ notify: () => {} });
+			for (let i = 0; i < 50; i++) {
+				assert.notEqual(seeded.nextAgentId(), pinned, `roll ${i} re-rolled the reserved name`);
+			}
+		} finally {
+			Math.random = prevRandom;
+			if (prevEnv === undefined) delete process.env[ANCESTOR_IDS_ENV];
+			else process.env[ANCESTOR_IDS_ENV] = prevEnv;
+		}
+	});
+
+	it("absent/malformed env seeds nothing (today's behavior exactly)", () => {
+		const prevEnv = process.env[ANCESTOR_IDS_ENV];
+		try {
+			process.env[ANCESTOR_IDS_ENV] = "Eva, eva!, ,a1";
+			const registry = new AgentRegistry({ notify: () => {} });
+			const id = registry.nextAgentId();
+			assert.ok(/^[a-z]+$/.test(id), `still yields a plain name: ${id}`);
+		} finally {
+			if (prevEnv === undefined) delete process.env[ANCESTOR_IDS_ENV];
+			else process.env[ANCESTOR_IDS_ENV] = prevEnv;
+		}
 	});
 });

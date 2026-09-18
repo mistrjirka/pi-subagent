@@ -323,7 +323,7 @@ export class AgentProcess {
 	 *
 	 * stop() early-returns for an already-settled agent (a persistent agent
 	 * sitting at completed/idle), so the normal completion path keeps
-	 * reporting completed/failed. stopAndRemove() calls this right after
+	 * reporting completed/failed. stopAndRemove() calls this before awaiting
 	 * stop() so the external-control bridge's terminal check observes
 	 * "stopped" and winds down instead of heartbeating idle forever.
 	 * Idempotent, and never overwrites an already-terminal failed — failed

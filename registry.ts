@@ -86,6 +86,57 @@ interface AgentRegistryDeps {
 	getWidget?: () => WidgetSurface | null;
 	/** This process is itself a child agent ("@parent" is deliverable upward). */
 	hasParent?: boolean;
+	/**
+	 * Ancestor/cousin names the child's own spawns must never re-roll
+	 * (cross-process collision guard — see ANCESTOR_IDS_ENV). When omitted,
+	 * the constructor falls back to parsing the env var itself, so a child
+	 * process spawned with the chain is seeded with no extra wiring.
+	 */
+	seedNames?: readonly string[];
+}
+
+/**
+ * Env var carrying the comma-separated ancestor id chain to a child process
+ * (own id first, then ancestors up to the root). Seeded into the child's
+ * registry so `nextAgentId` can never re-roll an ancestor/cousin name —
+ * consumers rendering the whole tree keyed by bare id (PiTTy does) would
+ * otherwise see two different agents under one id.
+ */
+export const ANCESTOR_IDS_ENV = "PI_SUBAGENT_ANCESTOR_IDS";
+
+/** Single id charset: the name-gen pool is lowercase alpha (see name-gen.ts). */
+const ANCESTOR_ID_PATTERN = /^[a-z]{1,64}$/;
+
+/**
+ * Parse an ancestor-chain env value into validated ids (deduped, order
+ * preserved). Malformed entries are dropped; absent/malformed input yields
+ * [] — today's behavior exactly (no seeding).
+ */
+export function parseAncestorIds(raw: string | undefined | null): string[] {
+	if (!raw) return [];
+	const seen = new Set<string>();
+	for (const part of raw.split(",")) {
+		const id = part.trim();
+		if (!ANCESTOR_ID_PATTERN.test(id) || seen.has(id)) continue;
+		seen.add(id);
+	}
+	return [...seen];
+}
+
+/**
+ * Build the chain value a spawner passes to its child: the child's own id
+ * first, then this process's id (when it has one — "" = root session),
+ * then the chain inherited from our own parent. Deduped, order preserved.
+ */
+export function buildAncestorChain(newId: string, ownId: string, inheritedRaw: string | undefined): string {
+	const seen = new Set<string>();
+	const chain: string[] = [];
+	for (const id of [newId, ownId, ...parseAncestorIds(inheritedRaw)]) {
+		if (!id || !ANCESTOR_ID_PATTERN.test(id) || seen.has(id)) continue;
+		seen.add(id);
+		chain.push(id);
+	}
+	return chain.join(",");
 }
 
 export class AgentRegistry {
@@ -112,13 +163,22 @@ export class AgentRegistry {
 		this.supervisionIntervalMs = deps.supervisionIntervalMs ?? 180_000;
 		this.getWidget = deps.getWidget ?? (() => null);
 		this.hasParent = deps.hasParent ?? false;
+		// Cross-process collision guard: reserve ancestor/cousin names so
+		// nextAgentId can never re-roll them. Absent/malformed env seeds
+		// nothing — today's behavior exactly.
+		const seeds = deps.seedNames ?? parseAncestorIds(process.env[ANCESTOR_IDS_ENV]);
+		for (const name of seeds) {
+			if (ANCESTOR_ID_PATTERN.test(name)) this.usedNames.add(name);
+		}
 	}
 
 	/**
 	 * Short human-name id (max, zoe, kai…) — the LLM-facing agent reference
 	 * for this session (agent_send targets, notification JSON). Names read
 	 * as names (not machine codes) and cost ~1 token each; uniqueness is
-	 * this session's live set (re-roll on collision).
+	 * this session's live set (re-roll on collision) plus the ancestor ids
+	 * seeded from PI_SUBAGENT_ANCESTOR_IDS at construction, so a nested
+	 * child process can never re-roll an ancestor/cousin name.
 	 */
 	nextAgentId(): string {
 		const name = randomAgentName(this.usedNames);
@@ -362,13 +422,19 @@ export class AgentRegistry {
 	async stopAndRemove(agentId: string): Promise<boolean> {
 		const agent = this.agents.get(agentId);
 		if (!agent) return false;
+		// Mark stopped FIRST, synchronously: a completion landing while
+		// `await agent.stop()` is in flight must observe stoppedByControl
+		// and suppress its notification (stop/complete race). stop() also
+		// flags the stop itself, but only after the transport shutdown it
+		// awaits — too late to close the window.
+		agent.markStopped();
 		await agent.stop();
 		// An already-settled resident agent (completed/idle) is untouched by
 		// stop()'s early return, which would leave the control bridge
-		// heartbeating idle forever — record the explicit stop as terminal so
-		// the bridge's existing terminal check winds it down. Never applied
-		// on the normal completion path (complete() must keep completed/failed).
-		agent.markStopped();
+		// heartbeating idle forever — the markStopped() above already
+		// recorded the explicit stop as terminal so the bridge's existing
+		// terminal check winds it down. Never applied on the normal
+		// completion path (complete() must keep completed/failed).
 		this.recordSettlement(agentId, {
 			completion: {
 				status: "stopped",

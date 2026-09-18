@@ -384,7 +384,7 @@ describe("AgentProcess — latest activity", () => {
 			type: "message_update",
 			assistantMessageEvent: { type: "thinking_delta", delta: "Let me analyze the structure" },
 		});
-		assert.deepEqual(agent.getLatestActivity(), { kind: "thinking", text: "" });
+		assert.deepEqual(agent.getLatestActivity(), { kind: "thinking", text: "Let me analyze the structure" });
 	});
 
 	it("summarizes tool calls with the friendly argument key", async () => {
@@ -772,7 +772,7 @@ describe("AgentProcess — onStream sink (events.jsonl tail)", () => {
 		);
 		assert.deepEqual(deltas, ["hi"]);
 		assert.deepEqual(activities, [
-			{ kind: "thinking", text: "" },
+			{ kind: "thinking", text: "hmm" },
 			{ kind: "tool", name: "bash", args: "ls", id: "call-1" },
 		]);
 	});

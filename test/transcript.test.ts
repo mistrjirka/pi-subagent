@@ -75,8 +75,7 @@ describe("transcript formatting", () => {
 		const options = { maxMessages: 4, maxChars: 220, perMessageChars: 180 };
 		const markerOnly = formatTranscript(base, options);
 		const detailed = formatTranscript(withThinking, options);
-		const toolEvidence = (text: string) =>
-			(text.match(/\[tool call\]|tool result/g) ?? []).length;
+		const toolEvidence = (text: string) => (text.match(/\[tool call\]|tool result/g) ?? []).length;
 		assert.equal(toolEvidence(detailed), toolEvidence(markerOnly));
 		assert.match(detailed, /x{100}/);
 		assert.match(detailed, /tool result \(grep\): grep ok/);

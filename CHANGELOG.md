@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.3 — full thinking in supervision transcripts
+
+- Show the actual plaintext thinking text, when the provider exposes it, in every supervision transcript path instead of reducing it to `[thinking]`: timed `agent_wait` snapshots, `agent_inspect`, and the 3-minute fallback supervision reminder all share the same formatter.
+- Keep tool visibility exactly compatible with the previous marker-only budgets. Message selection and the recent-activity tail are computed from the old compact representation first; thinking bodies are inserted only afterward, so adding reasoning cannot evict a tool call/result that the same limits showed before.
+- Keep the marker fallback when a provider/runtime exposes a thinking block without plaintext content.
+- Add regressions with very large thinking blocks proving that the same tool-call/tool-result rows remain visible.
+
 ## 0.5.2 — visible subagent thinking text
 
 - Preserve plaintext `thinking_delta` content in the in-memory `RenderEvent` fold instead of reducing it to a marker. Consecutive chunks accumulate into one growing thinking row.

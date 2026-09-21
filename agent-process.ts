@@ -389,6 +389,13 @@ export class AgentProcess {
 						this.onIdle?.(this.agentError ? "failed" : "completed");
 					}
 					break;
+				case "assistant_start":
+				case "assistant_end":
+					// Stream-only message boundaries. They give external transcript
+					// readers a stable assistant-turn identity without changing the
+					// card/widget activity fold.
+					this.onStream?.(ev);
+					break;
 				case "thinking": {
 					// Preserve plaintext reasoning deltas for the human-facing card/widget.
 					// Consecutive chunks stay one event so the card grows in place rather

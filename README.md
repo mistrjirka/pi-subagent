@@ -361,13 +361,13 @@ control/stop.json
 `events.jsonl` in the same directory is the append-only live tail for external readers. It is the only channel that carries a **background** child's progress, because the live tool card exists for foreground spawns only. One JSON object per line:
 
 ```text
-{"v":1,"seq":1,"ts":1789657746999,"runId":"max","kind":"thinking","blockId":"think-0","text":"let me check"}
-{"v":1,"seq":2,"ts":1789657747000,"runId":"max","kind":"text","blockId":"text-1","text":"The build passes."}
-{"v":1,"seq":3,"ts":1789657747000,"runId":"max","kind":"tool_start","toolName":"bash","toolCallId":"call-3"}
-{"v":1,"seq":4,"ts":1789657747000,"runId":"max","kind":"tool_end","toolName":"bash","toolCallId":"call-3"}
+{"v":1,"seq":1,"ts":1789657746999,"runId":"max","messageSeq":1,"kind":"thinking","blockId":"think-0","text":"let me check"}
+{"v":1,"seq":2,"ts":1789657747000,"runId":"max","messageSeq":1,"kind":"text","blockId":"text-1","text":"The build passes."}
+{"v":1,"seq":3,"ts":1789657747000,"runId":"max","messageSeq":1,"kind":"tool_start","toolName":"bash","toolCallId":"call-3"}
+{"v":1,"seq":4,"ts":1789657747000,"runId":"max","messageSeq":1,"kind":"tool_end","toolName":"bash","toolCallId":"call-3"}
 ```
 
-`kind` is `thinking`, `text`, `tool_start` or `tool_end`. A `thinking`/`text` line carries an incremental `text` chunk plus a `blockId` identifying one content block of the current assistant message, so consecutive lines sharing a `blockId` accumulate into a single in-flight item. Writes are coalesced — flushed on a kind change, every 250 ms, or past roughly 4 KB — and text stops at a 2 MB cap while tool rows keep flowing, so no reader should assume `seq` is contiguous. Readers must ignore a torn trailing line and unknown fields. The file is created with the run and removed with the `controlDir`, so its absence after a Pi restart is expected rather than an error.
+`kind` is `thinking`, `text`, `tool_start` or `tool_end`. `messageSeq` is the 1-based assistant-message sequence for the child run; together with `blockId` it gives external readers a stable turn-local identity even though content indexes such as `think-0` repeat on later assistant messages. A `thinking`/`text` line carries an incremental `text` chunk plus that turn-local `blockId`. Writes are coalesced — flushed on a kind change, every 250 ms, or past roughly 4 KB — and text stops at a 2 MB cap while tool rows keep flowing, so no reader should assume `seq` is contiguous. Readers must ignore a torn trailing line and unknown fields. The file is created with the run and removed with the `controlDir`, so its absence after a Pi restart is expected rather than an error.
 
 The bridge supports direct **steer** and **stop**. It intentionally does not invent pause/resume semantics that Pi itself does not provide for these resident RPC children.
 

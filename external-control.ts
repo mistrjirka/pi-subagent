@@ -163,6 +163,8 @@ export interface ChildStreamLine {
 	seq: number;
 	ts: number;
 	runId: string;
+	/** 1-based assistant message sequence. Optional for backward compatibility. */
+	messageSeq?: number;
 	kind: "thinking" | "text" | "tool_start" | "tool_end";
 	blockId?: string;
 	text?: string;
@@ -191,6 +193,8 @@ export class ExternalControlBridge {
 	private processing = false;
 	// ── events.jsonl appender state ──
 	private seq = 0;
+	private assistantMessageSeq = 0;
+	private currentAssistantMessageSeq: number | undefined;
 	private fileBytes = 0;
 	private buf: Array<{ line: string; kind: ChildStreamLine["kind"]; bytes: number }> = [];
 	private bufBytes = 0;
@@ -236,11 +240,24 @@ export class ExternalControlBridge {
 	 */
 	appendEvents(event: AgentEvent): void {
 		if (!this.eventsWritable) return;
+		if (event.type === "assistant_start") {
+			// A contentIndex such as think-0/text-1 is only unique inside one
+			// assistant message. Flush any previous buffer before advancing the
+			// turn so equal block ids from adjacent messages never coalesce.
+			this.flushEvents();
+			this.currentAssistantMessageSeq = ++this.assistantMessageSeq;
+			return;
+		}
+		if (event.type === "assistant_end") {
+			this.flushEvents();
+			this.currentAssistantMessageSeq = undefined;
+			return;
+		}
 		const record = toStreamRecord(event);
 		if (!record) return;
 		// 2 MB cap: drop thinking/text, keep tool_start/tool_end.
 		if ((record.kind === "thinking" || record.kind === "text") && this.fileBytes >= this.eventsCap) return;
-		const key = `${record.kind}\0${record.blockId ?? ""}`;
+		const key = `${this.currentAssistantMessageSeq ?? 0}\0${record.kind}\0${record.blockId ?? ""}`;
 		// Flush when the kind (or blockId) changes so a reader never sees a
 		// stale open block interleaved with a new one.
 		if (this.buf.length > 0 && key !== this.bufKey) this.flushEvents();
@@ -250,6 +267,7 @@ export class ExternalControlBridge {
 			seq: this.seq,
 			ts: Date.now(),
 			runId: this.agent.agentId,
+			...(this.currentAssistantMessageSeq !== undefined ? { messageSeq: this.currentAssistantMessageSeq } : {}),
 			kind: record.kind,
 			...(record.blockId !== undefined ? { blockId: record.blockId } : {}),
 			...(record.text !== undefined ? { text: record.text } : {}),

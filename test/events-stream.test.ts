@@ -76,6 +76,13 @@ function validatedLine(value: unknown): ChildStreamLine {
 		"known kind",
 	);
 	const line: ChildStreamLine = { v: 1, seq: v.seq, ts: v.ts, runId: v.runId, kind: v.kind };
+	if (v.messageSeq !== undefined) {
+		assert.ok(
+			typeof v.messageSeq === "number" && Number.isInteger(v.messageSeq) && v.messageSeq > 0,
+			"messageSeq is a positive integer",
+		);
+		line.messageSeq = v.messageSeq;
+	}
 	if (v.blockId !== undefined) {
 		assert.ok(typeof v.blockId === "string", "blockId is a string");
 		line.blockId = v.blockId;
@@ -176,6 +183,24 @@ describe("events.jsonl — envelope and writer rules", () => {
 		assert.equal(end?.kind, "tool_end");
 		assert.equal(end?.toolName, "bash");
 		assert.equal(end?.toolCallId, "call-1");
+	});
+
+	it("tags repeated block ids with distinct assistant message sequences", () => {
+		const bridge = makeBridge({ flushIntervalMs: 60_000, maxBufferedBytes: 1024 * 1024 });
+		for (const ev of interpretEvent({ type: "message_start", message: { role: "assistant" } })) bridge.appendEvents(ev);
+		feed(bridge, { type: "thinking_delta", contentIndex: 0, delta: "first" });
+		for (const ev of interpretEvent({ type: "message_end", message: { role: "assistant" } })) bridge.appendEvents(ev);
+		for (const ev of interpretEvent({ type: "message_start", message: { role: "assistant" } })) bridge.appendEvents(ev);
+		feed(bridge, { type: "thinking_delta", contentIndex: 0, delta: "second" });
+		for (const ev of interpretEvent({ type: "message_end", message: { role: "assistant" } })) bridge.appendEvents(ev);
+		const lines = readLines(bridge);
+		assert.deepEqual(
+			lines.map((line) => [line.blockId, line.messageSeq, line.text]),
+			[
+				["think-0", 1, "first"],
+				["think-0", 2, "second"],
+			],
+		);
 	});
 
 	it("a new blockId starts a new in-flight item (think-0 vs think-1)", () => {

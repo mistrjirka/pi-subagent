@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.5 — stable live transcript turn identity
+
+- Tag `events.jsonl` thinking/text/tool records with an additive 1-based `messageSeq` derived from Pi's real assistant `message_start`/`message_end` lifecycle. Repeated block ids such as `think-0` are now distinguishable across assistant turns without using content as identity.
+- Flush the live-stream buffer at assistant message boundaries so adjacent turns cannot coalesce merely because they reuse the same content index.
+- Keep the wire format backward compatible: `v` stays `1`, `messageSeq` is optional, and readers that ignore unknown fields continue to work.
+- Add regressions for assistant lifecycle interpretation and repeated `think-0` blocks across separate messages.
+
 ## 0.5.4 — consumed completion notifications
 
 - Prevent a late duplicate completion notification when a child settles during an active parent turn and the parent then consumes the cached result with `agent_wait`. Completion/question announcements now stay pending until the parent `agent_settled` event and are cancelled if `agent_wait` consumes that settlement first.

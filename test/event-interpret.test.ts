@@ -28,6 +28,19 @@ describe("interpretEvent — agent_settled", () => {
 	});
 });
 
+describe("interpretEvent — assistant message boundaries", () => {
+	it("maps assistant message_start/message_end and ignores other roles", () => {
+		assert.deepEqual(interpretEvent({ type: "message_start", message: { role: "assistant" } }), [
+			{ type: "assistant_start" },
+		]);
+		assert.deepEqual(interpretEvent({ type: "message_end", message: { role: "assistant" } }), [
+			{ type: "assistant_end" },
+		]);
+		assert.deepEqual(interpretEvent({ type: "message_start", message: { role: "user" } }), []);
+		assert.deepEqual(interpretEvent({ type: "message_end", message: { role: "toolResult" } }), []);
+	});
+});
+
 describe("interpretEvent — message_update deltas", () => {
 	it("extracts text_delta from assistantMessageEvent", () => {
 		assert.deepEqual(

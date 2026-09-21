@@ -43,6 +43,8 @@ export type AgentActivity =
  */
 export type AgentEvent =
 	| { type: "settled" }
+	| { type: "assistant_start" }
+	| { type: "assistant_end" }
 	| { type: "thinking"; text?: string; contentIndex?: number }
 	| { type: "tool_start"; toolCallId: string; toolName: string; contentIndex?: number }
 	| { type: "tool_call"; activity: Extract<AgentActivity, { kind: "tool" }>; contentIndex?: number }
@@ -128,6 +130,16 @@ function summarizeArgs(name: string, args: unknown): string {
  */
 export function interpretEvent(raw: RpcEvent): AgentEvent[] {
 	if (raw.type === "agent_settled") return [{ type: "settled" }];
+	if (raw.type === "message_start" || raw.type === "message_end") {
+		const message =
+			raw.message && typeof raw.message === "object" && !Array.isArray(raw.message)
+				? (raw.message as Record<string, unknown>)
+				: undefined;
+		if (message?.role === "assistant") {
+			return [{ type: raw.type === "message_start" ? "assistant_start" : "assistant_end" }];
+		}
+		return [];
+	}
 
 	if (raw.type === "message_update") {
 		const ae = raw.assistantMessageEvent as

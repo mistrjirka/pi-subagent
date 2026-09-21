@@ -39,4 +39,10 @@ describe("supervision wording stays plain", () => {
 		assert.ok(indexSource.includes("180-second supervision window"), "guidelines lost the 180-second default");
 		assert.ok(readmeSource.includes("180-second default"), "README lost the 180-second default");
 	});
+
+	it("flushes deferred completion announcements only after the parent fully settles", () => {
+		assert.ok(indexSource.includes('pi.on("agent_settled", () => registry.parentBecameIdle())'));
+		assert.ok(!indexSource.includes('pi.on("agent_end", () => registry.parentBecameIdle())'));
+		assert.ok(indexSource.includes("current !== agent"), "stale reminder re-check missing");
+	});
 });

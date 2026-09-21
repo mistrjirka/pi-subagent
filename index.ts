@@ -451,6 +451,12 @@ export default function (pi: ExtensionAPI) {
 							maxChars: 4_000,
 							perMessageChars: 1_000,
 						});
+						// Transcript collection is asynchronous. The child may settle while
+						// it is in flight; do not emit a stale "still running" reminder.
+						const current = registry.lookup(agent.agentId);
+						if (current !== agent || (current.status && current.status !== "running" && current.status !== "queued")) {
+							return;
+						}
 						pi.sendMessage(
 							{
 								customType: "subagent-supervision",
@@ -482,10 +488,13 @@ export default function (pi: ExtensionAPI) {
 		hasParent: HAS_PARENT,
 	});
 	const controlBridges = new Set<ExternalControlBridge>();
-	if (!HAS_PARENT) {
-		pi.on("agent_start", () => registry.parentBecameActive());
-		pi.on("agent_end", () => registry.parentBecameIdle());
-	}
+	// Every Pi session can own a resident child, even though only the root may
+	// spawn background work. Track the parent's actual active/settled window at
+	// every depth so resumed-child announcements cannot race a late agent_wait.
+	pi.on("agent_start", () => registry.parentBecameActive());
+	// agent_end can be followed by automatic retry/compaction. Flush deferred
+	// child announcements only when Pi reports the parent is actually settled.
+	pi.on("agent_settled", () => registry.parentBecameIdle());
 
 	// Inbound messages (a child addresses @parent, forwards a sibling's
 	// message, or reports an unroutable target) land here from its rpc event
@@ -669,8 +678,11 @@ export default function (pi: ExtensionAPI) {
 				};
 				const settleWake = async (status: "completed" | "failed"): Promise<void> => {
 					const completion = await wakeCompletion(status);
-					const waited = registry.recordSettlement(agentId, { completion });
-					if (!waited && !agent.stoppedByControl) notifyCompletion(pi, agent, completion);
+					registry.recordSettlement(
+						agentId,
+						{ completion },
+						agent.stoppedByControl ? undefined : () => notifyCompletion(pi, agent, completion),
+					);
 				};
 				const live = createLiveChannels({
 					// getWidget, not widget: the widget is created on first use, so a
@@ -737,12 +749,16 @@ export default function (pi: ExtensionAPI) {
 								pendingQuestion = agent.pendingQuestion;
 								void wakeCompletion("completed")
 									.then((completion) => {
-										const waited = registry.recordSettlement(agentId, {
-											completion,
-											waitingForParent: true,
-											question: agent.pendingQuestion,
-										});
-										if (!waited && agent.pendingQuestion) notifyQuestion(agent.pendingQuestion);
+										const question = agent.pendingQuestion;
+										registry.recordSettlement(
+											agentId,
+											{
+												completion,
+												waitingForParent: true,
+												question,
+											},
+											question ? () => notifyQuestion(question) : undefined,
+										);
 										registry.markIdle(agentId);
 									})
 									.catch(() => {});
@@ -832,13 +848,17 @@ export default function (pi: ExtensionAPI) {
 									.then((completion) => {
 										const child = a as AgentProcess;
 										if (completion.status === "completed" && child.awaitingParent && child.pendingQuestion) {
-											pendingQuestion = child.pendingQuestion;
-											const waited = registry.recordSettlement(child.agentId, {
-												completion,
-												waitingForParent: true,
-												question: child.pendingQuestion,
-											});
-											if (!waited) notifyQuestion(child.pendingQuestion);
+											const question = child.pendingQuestion;
+											pendingQuestion = question;
+											registry.recordSettlement(
+												child.agentId,
+												{
+													completion,
+													waitingForParent: true,
+													question,
+												},
+												() => notifyQuestion(question),
+											);
 											registry.markIdle(child.agentId);
 											return;
 										}

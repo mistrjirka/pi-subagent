@@ -144,9 +144,16 @@ export class AgentRegistry {
 	private readonly notify: AgentRegistryDeps["notify"];
 	private readonly getWidget: NonNullable<AgentRegistryDeps["getWidget"]>;
 	private readonly hasParent: boolean;
-	/** Latest settled turn for each id; retained so agent_wait can arrive after the notification. */
+	/** Latest settled turn for each id; retained so agent_wait can arrive after completion. */
 	private readonly settlements = new Map<string, AgentSettlement>();
 	private readonly settlementWaiters = new Map<string, Set<(settlement: AgentSettlement | null | undefined) => void>>();
+	/**
+	 * Completion/question announcements that settled during an active parent turn.
+	 * They are flushed only once the parent fully settles, unless agent_wait
+	 * consumes the cached settlement first. This prevents a stale queued
+	 * follow-up from arriving after the model already read the same result.
+	 */
+	private readonly pendingAnnouncements = new Map<string, () => Promise<void> | void>();
 	private readonly remind: NonNullable<AgentRegistryDeps["remind"]>;
 	private readonly supervisionIntervalMs: number;
 	private readonly supervisionTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -197,15 +204,28 @@ export class AgentRegistry {
 		return this.agents.get(agentId);
 	}
 
-	/** Record a child turn settling and wake any explicit agent_wait callers. Returns true when a waiter consumed it live. */
-	recordSettlement(agentId: string, settlement: AgentSettlement): boolean {
+	/**
+	 * Record a child turn settling and wake explicit agent_wait callers.
+	 * If nobody is already waiting, an optional announcement is either sent
+	 * immediately while the parent is idle or deferred until the parent fully
+	 * settles. A later cached agent_wait consumes and cancels that announcement.
+	 */
+	recordSettlement(agentId: string, settlement: AgentSettlement, announce?: () => Promise<void> | void): boolean {
 		this.stopSupervision(agentId);
+		// A new settlement supersedes any unannounced result from an earlier turn.
+		this.pendingAnnouncements.delete(agentId);
 		this.settlements.set(agentId, settlement);
 		const waiters = this.settlementWaiters.get(agentId);
-		if (!waiters?.size) return false;
-		this.settlementWaiters.delete(agentId);
-		for (const resolve of waiters) resolve(settlement);
-		return true;
+		if (waiters?.size) {
+			this.settlementWaiters.delete(agentId);
+			for (const resolve of waiters) resolve(settlement);
+			return true;
+		}
+		if (announce) {
+			if (this.parentActive) this.pendingAnnouncements.set(agentId, announce);
+			else void Promise.resolve(announce()).catch(() => {});
+		}
+		return false;
 	}
 
 	/** Start/restart fallback supervision for a live direct child. */
@@ -223,9 +243,15 @@ export class AgentRegistry {
 		this.supervisionTimers.clear();
 	}
 
-	/** Parent ended its turn: begin a fresh unsupervised window for every live tracked child. */
+	/**
+	 * Parent fully settled: announce any child results not consumed by agent_wait,
+	 * then begin a fresh unsupervised window for every still-live tracked child.
+	 */
 	parentBecameIdle(): void {
 		this.parentActive = false;
+		const pending = [...this.pendingAnnouncements.values()];
+		this.pendingAnnouncements.clear();
+		for (const announce of pending) void Promise.resolve(announce()).catch(() => {});
 		const now = Date.now();
 		for (const agentId of this.supervisedAgents) {
 			this.lastSupervisedAt.set(agentId, now);
@@ -305,7 +331,13 @@ export class AgentRegistry {
 		timeoutMs?: number,
 	): Promise<AgentSettlement | null | undefined> {
 		const cached = this.settlements.get(agentId);
-		if (cached) return cached;
+		if (cached) {
+			// The parent explicitly consumed this already-settled turn. If its
+			// completion/question announcement was deferred during the active turn,
+			// suppress it instead of delivering the same result again afterward.
+			this.pendingAnnouncements.delete(agentId);
+			return cached;
+		}
 		if (!this.agents.has(agentId)) return undefined;
 		if (signal?.aborted) throw new Error("agent_wait cancelled");
 		if (timeoutMs !== undefined && (!Number.isFinite(timeoutMs) || timeoutMs < 0)) {
@@ -352,6 +384,7 @@ export class AgentRegistry {
 	/** A successful steer/answer starts a new turn, so future waits must observe the next settlement. */
 	clearSettlement(agentId: string): void {
 		this.settlements.delete(agentId);
+		this.pendingAnnouncements.delete(agentId);
 	}
 
 	/**
@@ -363,26 +396,20 @@ export class AgentRegistry {
 	 * removes it later.
 	 */
 	async complete(agent: RegisteredAgent, completion: AgentCompletion): Promise<void> {
-		const waited = this.recordSettlement(agent.agentId, { completion });
-		const notify = () => (agent.stoppedByControl || waited ? Promise.resolve() : this.notify(agent, completion));
+		this.recordSettlement(
+			agent.agentId,
+			{ completion },
+			agent.stoppedByControl ? undefined : () => this.notify(agent, completion),
+		);
 		if ((agent.shouldStayResident ?? agent.persistent) && completion.status === "completed") {
-			try {
-				// A failed notification must never kill a resident agent — the
-				// idle row stays (addressable), the agent stays up.
-				await Promise.resolve(notify()).catch(() => {});
-			} finally {
-				// Resident — no remove, no stop. The widget row flips to idle so
-				// the agent stays addressable (agent_stop removes it later).
-				this.getWidget()?.setStatus?.(agent.agentId, "idle");
-			}
+			// Resident — no remove, no stop. Notification delivery is owned by
+			// recordSettlement: immediate when the parent is idle, deferred while
+			// active, or suppressed if agent_wait consumes the settlement first.
+			this.getWidget()?.setStatus?.(agent.agentId, "idle");
 			return;
 		}
-		try {
-			await notify();
-		} finally {
-			this.remove(agent.agentId, completion.status === "completed" ? "done" : completion.status);
-			await agent.stop().catch(() => {});
-		}
+		this.remove(agent.agentId, completion.status === "completed" ? "done" : completion.status);
+		await agent.stop().catch(() => {});
 	}
 
 	/**
@@ -451,6 +478,7 @@ export class AgentRegistry {
 		for (const agentId of this.agents.keys()) this.stopSupervision(agentId);
 		for (const waiters of this.settlementWaiters.values()) for (const resolve of waiters) resolve(undefined);
 		this.settlementWaiters.clear();
+		this.pendingAnnouncements.clear();
 		for (const agent of this.agents.values()) {
 			void agent.stop();
 		}

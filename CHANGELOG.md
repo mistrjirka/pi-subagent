@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.4 — consumed completion notifications
+
+- Prevent a late duplicate completion notification when a child settles during an active parent turn and the parent then consumes the cached result with `agent_wait`. Completion/question announcements now stay pending until the parent `agent_settled` event and are cancelled if `agent_wait` consumes that settlement first.
+- Apply the same rule to `ask_parent` questions and completed persistent follow-up turns, so a parent cannot answer/read a cached child result and then receive the stale notification afterward.
+- Flush deferred announcements on `agent_settled`, not `agent_end`; Pi may still retry or compact after `agent_end`.
+- Re-check a child's live registry/status after asynchronous supervision transcript collection so a child that finishes during that await cannot emit a stale "still running" reminder.
+- Add regressions for cached completion consumption, deferred single delivery, and cached `ask_parent` consumption.
+
 ## 0.5.3 — full thinking in supervision traces
 
 - Show the child's actual plaintext thinking in monitoring transcripts instead of collapsing every reasoning block to `[thinking]`.

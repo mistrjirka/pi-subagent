@@ -107,6 +107,9 @@ function makeRegistry(widget: FakeWidget | null = new FakeWidget(), hasParent = 
 		getWidget: () => widget,
 		hasParent,
 	});
+	// Most unit tests exercise lifecycle policy outside an active parent model
+	// turn. Tests for deferred announcements leave the registry active explicitly.
+	registry.parentBecameIdle();
 	return { registry, widget, notified };
 }
 
@@ -297,6 +300,63 @@ describe("AgentRegistry — explicit wait", () => {
 		await registry.complete(agent, completion({ output: "waited" }));
 		assert.equal((await waiting)?.completion.output, "waited");
 		assert.deepEqual(notified, []);
+	});
+
+	it("a cached settlement consumed during the active parent turn cancels its deferred notification", async () => {
+		const notified: string[] = [];
+		const registry = new AgentRegistry({
+			notify: (agent) => {
+				notified.push(agent.agentId);
+			},
+			supervisionIntervalMs: 0,
+		});
+		const agent = new FakeAgent("a1");
+		registry.register(agent);
+
+		await registry.complete(agent, completion({ output: "already done" }));
+		assert.deepEqual(notified, [], "completion is deferred while the parent turn is active");
+		assert.equal((await registry.waitForSettlement("a1"))?.completion.output, "already done");
+		registry.parentBecameIdle();
+
+		assert.deepEqual(notified, [], "agent_wait consumed the cached result; no late duplicate notification");
+	});
+
+	it("an unconsumed completion during the active parent turn announces once when the parent settles", async () => {
+		const notified: string[] = [];
+		const registry = new AgentRegistry({
+			notify: (agent) => {
+				notified.push(agent.agentId);
+			},
+			supervisionIntervalMs: 0,
+		});
+		const agent = new FakeAgent("a1");
+		registry.register(agent);
+
+		await registry.complete(agent, completion({ output: "done" }));
+		assert.deepEqual(notified, []);
+		registry.parentBecameIdle();
+		assert.deepEqual(notified, ["a1"]);
+		registry.parentBecameIdle();
+		assert.deepEqual(notified, ["a1"], "settling twice cannot replay the same completion");
+	});
+
+	it("a cached ask_parent settlement consumed by agent_wait cancels its deferred question announcement", async () => {
+		const announced: string[] = [];
+		const registry = new AgentRegistry({ notify: () => {}, supervisionIntervalMs: 0 });
+		const agent = new FakeAgent("a1", "stay", true);
+		registry.register(agent);
+		const c = completion({ output: "waiting" });
+		registry.recordSettlement(
+			"a1",
+			{ completion: c, waitingForParent: true, question: { from: "a1", question: "Which behavior?" } },
+			() => {
+				announced.push("question");
+			},
+		);
+
+		assert.equal((await registry.waitForSettlement("a1"))?.question?.question, "Which behavior?");
+		registry.parentBecameIdle();
+		assert.deepEqual(announced, []);
 	});
 
 	it("agent_stop wakes an active waiter with a stopped settlement", async () => {

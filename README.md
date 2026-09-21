@@ -282,7 +282,7 @@ Wait for a direct child that is running in the background or has been resumed wi
 { "agent_id": "@max" }
 ```
 
-With no explicit timeout, `agent_wait` uses a **180-second supervision window**. It returns sooner if the child completes/fails/stops or reaches `ask_parent`. If the child is still running after 3 minutes, it returns a recent transcript/activity snapshot and asks the parent to check progress. The child keeps running. `timeout_seconds` changes only this wait window:
+With no explicit timeout, `agent_wait` uses a **180-second supervision window**. It returns sooner if the child completes/fails/stops or reaches `ask_parent`. If the child settled earlier in the current parent turn, `agent_wait` consumes that cached settlement and suppresses the otherwise-pending completion/question notification, so the same result is not delivered again after the turn. If the child is still running after 3 minutes, it returns a recent transcript/activity snapshot and asks the parent to check progress. The child keeps running. `timeout_seconds` changes only this wait window:
 
 ```json
 { "agent_id": "@max", "timeout_seconds": 150 }

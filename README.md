@@ -15,7 +15,7 @@ The runtime deliberately does very little orchestration. The **parent Pi decides
 - **Persistent workers.** A child can stay resident after finishing and be continued with `agent_send` in the same context.
 - **Explicit wait.** `agent_wait` uses a 3-minute supervision window by default (or a caller-chosen window); expiry returns transcript/activity evidence and never stops the child, so shell sleep/poll loops are unnecessary.
 - **Fallback supervision.** When the root parent ends a turn with a background/resumed child still running, a 3-minute unsupervised clock starts. The reminder includes latest activity plus a short transcript tail and repeats after later idle turns until the parent waits, inspects, steers, stops, or the child settles.
-- **Clarification path.** `ask_parent` lets a child yield when material information is missing; its immediate parent answers the same resident context with `agent_send`.
+- **Escalation path.** `ask_parent` lets a child yield on material ambiguity, a non-obvious diagnosis, or a material implementation decision; its immediate parent answers the same resident context with `agent_send`.
 - **PiTTy bridge.** Spawn details expose a small direct-control directory for live inspection, steer, and stop. This does not emulate the old `pi-subagents` workflow runtime.
 
 The only forced termination paths are an explicit `agent_stop`, a user/parent abort of a foreground tool call, model/process failure, or shutdown of the hosting Pi process.
@@ -330,7 +330,7 @@ Available only inside subagents:
 
 The child yields the current turn and remains resident. The immediate spawning agent receives the question and answers that exact child with `agent_send`. This works recursively: an explorer asks its implementer; the implementer can ask the root if it also cannot resolve the ambiguity.
 
-Use this only for material ambiguity or missing information that would make guessing unsafe, not routine implementation decisions.
+Use this for material ambiguity/missing information or when unexpected evidence invalidates the route and resolving it requires non-obvious diagnosis or a material decision. Include the smallest safe reproduction or exact steps, decisive evidence, what requirement or route is blocked/invalidated, and the specific parent decision needed; routine implementation choices and obvious local fixes stay with the child.
 
 ### `agent_stop`
 

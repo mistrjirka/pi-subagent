@@ -1376,10 +1376,10 @@ export default function (pi: ExtensionAPI) {
 			name: "ask_parent",
 			label: "Ask Parent",
 			description:
-				"Escalate a material clarification, non-obvious diagnosis, or implementation decision that should be resolved by the immediate spawning agent. The current turn yields and this same context resumes when the parent answers.",
-			promptSnippet: "Escalate a blocking clarification, hard diagnosis, or material decision to your spawning agent",
+				"Escalate a blocker to the requested outcome when resolving it requires a material clarification, non-obvious diagnosis, or implementation decision from the immediate spawning agent. The current turn yields and this same context resumes when the parent answers.",
+			promptSnippet: "Escalate a blocker that needs parent clarification, diagnosis, or a material decision",
 			promptGuidelines: [
-				"Use ask_parent for material ambiguity or missing information, or when unexpected evidence blocks the requested outcome and resolving it requires non-obvious diagnosis or a material decision; make routine implementation decisions and obvious local fixes yourself.",
+				"Use ask_parent for material ambiguity or missing information that blocks the requested outcome, or when unexpected evidence blocks that outcome and resolving it requires non-obvious diagnosis or a material decision; make routine implementation decisions, obvious local fixes, and simple direct alternatives yourself.",
 				"Include the smallest safe reproduction or exact reproduction steps (or why reproduction is unsafe/impractical), the decisive evidence, what requirement or route it blocks or invalidates, and the specific decision/question for the parent.",
 				"Use the escalation only to resolve that blocker; do not broaden the artifact, add adjacent behavior, or raise its engineering scale.",
 				"After ask_parent succeeds, stop work and end the turn. Do not continue on an assumption. The parent will answer this same resident context with agent_send.",

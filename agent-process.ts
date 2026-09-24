@@ -207,8 +207,11 @@ export class AgentProcess {
 		// Do not clear the waiting state before RPC acceptance: a failed delivery
 		// must leave the question answerable.
 		const wasAwaitingParent = this.awaitingParent;
+		const deliveredText = wasAwaitingParent
+			? `[parent answer to your pending ask_parent]\n${text}`
+			: text;
 		const response = await this.client
-			.sendCommand({ type: "prompt", message: text, streamingBehavior: "steer" })
+			.sendCommand({ type: "prompt", message: deliveredText, streamingBehavior: "steer" })
 			.catch((err: Error) => ({
 				type: "response" as const,
 				command: "prompt" as const,

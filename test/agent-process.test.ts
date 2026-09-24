@@ -667,6 +667,12 @@ describe("AgentProcess — persistent / in-tree messages", () => {
 		assert.equal(agent.awaitingParent, true);
 
 		assert.equal(await agent.sendMessage("Use behavior A."), true);
+		const last = fake.commands[fake.commands.length - 1];
+		assert.equal(last?.type, "prompt");
+		assert.equal(
+			(last as { message?: string })?.message,
+			"[parent answer to your pending ask_parent]\nUse behavior A.",
+		);
 		assert.equal(agent.awaitingParent, false);
 		assert.equal(agent.pendingQuestion, undefined);
 		assert.equal(agent.status, "running");

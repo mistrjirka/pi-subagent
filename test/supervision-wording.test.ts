@@ -35,9 +35,10 @@ describe("supervision wording stays plain", () => {
 	it("keeps the supervision mechanism facts intact", () => {
 		assert.ok(indexSource.includes('"subagent-supervision"'), "reminder customType changed");
 		assert.ok(indexSource.includes("normally a 150-second window"), "reminder lost the 150-second cadence");
-		assert.ok(indexSource.includes("up to ~10k characters of transcript"), "guidelines lost the ~10k transcript fact");
+		assert.ok(indexSource.includes("unread transcript page"), "guidelines lost unread transcript paging");
 		assert.ok(indexSource.includes("180-second supervision window"), "guidelines lost the 180-second default");
 		assert.ok(readmeSource.includes("180-second default"), "README lost the 180-second default");
+		assert.ok(readmeSource.includes("get_entries(since)"), "README lost the stable entry cursor contract");
 	});
 
 	it("flushes deferred completion announcements only after the parent fully settles", () => {

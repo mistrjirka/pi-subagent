@@ -58,12 +58,7 @@ describe("IncrementalTranscriptCursor", () => {
 	});
 
 	it("serializes concurrent reads so parallel wait/inspect calls do not duplicate a page", async () => {
-		const entries = [
-			message("m1", "one"),
-			message("m2", "two"),
-			message("m3", "three"),
-			message("m4", "four"),
-		];
+		const entries = [message("m1", "one"), message("m2", "two"), message("m3", "three"), message("m4", "four")];
 		const calls: Array<string | undefined> = [];
 		const cursor = new IncrementalTranscriptCursor();
 		const agent = fakeAgent(entries, calls);
@@ -83,10 +78,7 @@ describe("IncrementalTranscriptCursor", () => {
 	});
 
 	it("advances through non-message session entries after the last unread message", async () => {
-		const entries: Entry[] = [
-			message("m1", "one"),
-			{ type: "compaction", id: "c1", summary: "summary" },
-		];
+		const entries: Entry[] = [message("m1", "one"), { type: "compaction", id: "c1", summary: "summary" }];
 		const calls: Array<string | undefined> = [];
 		const cursor = new IncrementalTranscriptCursor();
 		const agent = fakeAgent(entries, calls);

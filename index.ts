@@ -298,7 +298,8 @@ const InspectParamsSchema = Type.Object({
 		Type.Integer({
 			minimum: 1,
 			maximum: 30,
-			description: "Maximum number of unread child conversation messages to return in this page. Defaults to 12; later unread messages remain for the next read.",
+			description:
+				"Maximum number of unread child conversation messages to return in this page. Defaults to 12; later unread messages remain for the next read.",
 		}),
 	),
 });

@@ -294,7 +294,10 @@ function renderUnreadEntryPage(
 		if (line) rendered.push({ entryId, line });
 	}
 
-	const lastEntryId = [...entries].reverse().map(sessionEntryId).find((id): id is string => Boolean(id));
+	const lastEntryId = [...entries]
+		.reverse()
+		.map(sessionEntryId)
+		.find((id): id is string => Boolean(id));
 	if (!rendered.length) {
 		return {
 			text: "[no new transcript messages]",
@@ -317,8 +320,7 @@ function renderUnreadEntryPage(
 
 	const remainingMessages = rendered.length - kept.length;
 	const lastKept = kept[kept.length - 1];
-	const nextCursor =
-		remainingMessages > 0 ? lastKept.entryId : lastEntryId ?? lastKept.entryId;
+	const nextCursor = remainingMessages > 0 ? lastKept.entryId : (lastEntryId ?? lastKept.entryId);
 	const suffix =
 		remainingMessages > 0
 			? `\n\n[… ${remainingMessages} unread transcript message${remainingMessages === 1 ? "" : "s"} remain …]`

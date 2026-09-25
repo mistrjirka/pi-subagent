@@ -43,6 +43,8 @@ export interface RegisteredAgent {
 	getLatestActivity?: () => AgentActivity | undefined;
 	/** Actual live Pi conversation messages for transcript inspection. */
 	getMessages?: () => Promise<unknown[]>;
+	/** Append-ordered Pi session entries; `since` is a stable entry id cursor. */
+	getEntries?: (since?: string) => Promise<{ entries: unknown[]; leafId: string | null }>;
 	/** In-memory event trace fallback when RPC/persisted session inspection is unavailable. */
 	getEvents?: () => RenderEvent[];
 	/** Persisted child session file, when available. */

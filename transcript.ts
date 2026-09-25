@@ -233,6 +233,8 @@ export function formatTranscript(
 
 export interface TranscriptReadableAgent {
 	getMessages?: () => Promise<unknown[]>;
+	/** Append-ordered Pi session entries; `since` is a stable entry-id cursor. */
+	getEntries?: (since?: string) => Promise<{ entries: unknown[]; leafId: string | null }>;
 	getEvents?: () => RenderEvent[];
 	sessionPath?: string;
 }
@@ -241,6 +243,150 @@ export interface MonitoringTranscript {
 	text: string;
 	source: "rpc" | "session" | "events" | "none";
 	rpcError?: string;
+}
+
+export interface IncrementalMonitoringTranscript extends MonitoringTranscript {
+	/** Number of previously-unseen transcript messages returned by this read. */
+	returnedMessages: number;
+	/** Number of already-fetched unread messages left behind the page boundary. */
+	remainingMessages: number;
+	hasMore: boolean;
+	/** Stable session entry id through which this read may advance. */
+	nextCursor?: string;
+}
+
+function sessionEntryId(entry: unknown): string | undefined {
+	if (!entry || typeof entry !== "object") return undefined;
+	const id = (entry as Record<string, unknown>).id;
+	return typeof id === "string" && id ? id : undefined;
+}
+
+/** Project one persisted/RPC session entry onto the same message shape get_messages returns. */
+function sessionMessageFromEntry(entry: unknown): unknown | undefined {
+	if (!entry || typeof entry !== "object") return undefined;
+	const record = entry as Record<string, unknown>;
+	if (record.type !== "message" || !record.message || typeof record.message !== "object") return undefined;
+	const inner = record.message as Record<string, unknown>;
+	const recordMs = normalizeTimestamp(record.timestamp);
+	return recordMs !== undefined && messageTimestampMs(inner) === undefined
+		? { ...inner, timestamp: recordMs }
+		: record.message;
+}
+
+function renderUnreadEntryPage(
+	entries: readonly unknown[],
+	options: TranscriptFormatOptions = {},
+	nowMs: number = Date.now(),
+): Omit<IncrementalMonitoringTranscript, "source" | "rpcError"> {
+	const maxMessages = Math.max(1, Math.floor(options.maxMessages ?? DEFAULT_MAX_MESSAGES));
+	const maxChars = Math.max(256, Math.floor(options.maxChars ?? DEFAULT_MAX_CHARS));
+	const perMessageChars = Math.max(128, Math.floor(options.perMessageChars ?? DEFAULT_PER_MESSAGE_CHARS));
+	const rendered: Array<{ entryId: string; line: TranscriptLineProjection }> = [];
+
+	for (const entry of entries) {
+		const message = sessionMessageFromEntry(entry);
+		if (message === undefined) continue;
+		const entryId = sessionEntryId(entry);
+		if (!entryId) throw new Error("get_entries returned a message entry without an id");
+		const timestampMs =
+			message && typeof message === "object" ? messageTimestampMs(message as Record<string, unknown>) : undefined;
+		const line = formatTranscriptMessageProjection(message, perMessageChars, timestampMs, nowMs);
+		if (line) rendered.push({ entryId, line });
+	}
+
+	const lastEntryId = [...entries].reverse().map(sessionEntryId).find((id): id is string => Boolean(id));
+	if (!rendered.length) {
+		return {
+			text: "[no new transcript messages]",
+			returnedMessages: 0,
+			remainingMessages: 0,
+			hasMore: false,
+			...(lastEntryId ? { nextCursor: lastEntryId } : {}),
+		};
+	}
+
+	const kept: Array<{ entryId: string; line: TranscriptLineProjection }> = [];
+	let used = 0;
+	for (const item of rendered) {
+		if (kept.length >= maxMessages) break;
+		const cost = item.line.compact.length + (kept.length ? 2 : 0);
+		if (kept.length && used + cost > maxChars) break;
+		kept.push(item);
+		used += cost;
+	}
+
+	const remainingMessages = rendered.length - kept.length;
+	const lastKept = kept[kept.length - 1];
+	const nextCursor =
+		remainingMessages > 0 ? lastKept.entryId : lastEntryId ?? lastKept.entryId;
+	const suffix =
+		remainingMessages > 0
+			? `\n\n[… ${remainingMessages} unread transcript message${remainingMessages === 1 ? "" : "s"} remain …]`
+			: "";
+	return {
+		text: kept.map((item) => item.line.detailed).join("\n\n") + suffix,
+		returnedMessages: kept.length,
+		remainingMessages,
+		hasMore: remainingMessages > 0,
+		nextCursor,
+	};
+}
+
+async function getIncrementalMonitoringTranscript(
+	agent: TranscriptReadableAgent,
+	since: string | undefined,
+	options: TranscriptFormatOptions,
+): Promise<IncrementalMonitoringTranscript> {
+	if (!agent.getEntries) {
+		const rpcError = "child runtime does not expose get_entries";
+		return {
+			text: `[incremental transcript unavailable: ${rpcError}]`,
+			source: "none",
+			rpcError,
+			returnedMessages: 0,
+			remainingMessages: 0,
+			hasMore: false,
+		};
+	}
+	try {
+		const page = await agent.getEntries(since);
+		return { ...renderUnreadEntryPage(page.entries, options), source: "rpc" };
+	} catch (error) {
+		const rpcError = error instanceof Error ? error.message : String(error);
+		return {
+			text: `[incremental transcript unavailable: ${rpcError}]`,
+			source: "none",
+			rpcError,
+			returnedMessages: 0,
+			remainingMessages: 0,
+			hasMore: false,
+		};
+	}
+}
+
+/**
+ * Shared parent-side read cursor for one child. Reads are serialized so
+ * concurrent agent_wait / agent_inspect calls cannot consume the same page.
+ */
+export class IncrementalTranscriptCursor {
+	private afterEntryId: string | undefined;
+	private queue: Promise<void> = Promise.resolve();
+
+	read(
+		agent: TranscriptReadableAgent,
+		options: TranscriptFormatOptions = {},
+	): Promise<IncrementalMonitoringTranscript> {
+		const result = this.queue.then(async () => {
+			const snapshot = await getIncrementalMonitoringTranscript(agent, this.afterEntryId, options);
+			if (snapshot.nextCursor) this.afterEntryId = snapshot.nextCursor;
+			return snapshot;
+		});
+		this.queue = result.then(
+			() => undefined,
+			() => undefined,
+		);
+		return result;
+	}
 }
 
 export function recentSessionMessages(sessionPath: string, maxBytes = 512 * 1024): unknown[] {
@@ -262,20 +408,8 @@ export function recentSessionMessages(sessionPath: string, maxBytes = 512 * 1024
 		for (const line of text.split("\n")) {
 			if (!line.trim()) continue;
 			try {
-				const entry = JSON.parse(line) as { type?: unknown; message?: unknown; timestamp?: unknown };
-				if (entry.type === "message" && entry.message && typeof entry.message === "object") {
-					// The session record's own ISO time is the only clock on this
-					// path — the inner message carries none, so attach it additively
-					// (a copy; the record is never mutated) when the message itself
-					// lacks a usable time. Malformed times are dropped, never thrown.
-					const recordMs = normalizeTimestamp(entry.timestamp);
-					const inner = entry.message as Record<string, unknown>;
-					messages.push(
-						recordMs !== undefined && messageTimestampMs(inner) === undefined
-							? { ...inner, timestamp: recordMs }
-							: entry.message,
-					);
-				}
+				const message = sessionMessageFromEntry(JSON.parse(line));
+				if (message !== undefined) messages.push(message);
 			} catch {
 				// A concurrently-appended final line can be partial; ignore it.
 			}

@@ -16,7 +16,7 @@ import type { RenderEvent } from "../types.js";
 
 /** Programmable fake standing in for RpcClient. */
 class FakeClient {
-	commands: Array<{ type: string; message?: string }> = [];
+	commands: Array<{ type: string; message?: string; since?: string }> = [];
 	endInputCalls = 0;
 	killCalls = 0;
 	exitCode: number | null = null;
@@ -52,7 +52,7 @@ class FakeClient {
 		this.env = options.env;
 	}
 
-	async sendCommand(command: { type: string; message?: string }) {
+	async sendCommand(command: { type: string; message?: string; since?: string }) {
 		this.commands.push(command);
 		switch (command.type) {
 			case "prompt":
@@ -82,6 +82,19 @@ class FakeClient {
 								timestamp: 2,
 							},
 						],
+					},
+				};
+			case "get_entries":
+				return {
+					type: "response",
+					command: "get_entries",
+					success: true,
+					data: {
+						entries: [
+							{ type: "message", id: "m1", message: { role: "user", content: "task" } },
+							{ type: "message", id: "m2", message: { role: "assistant", content: "answer" } },
+						].filter((entry) => !command.since || entry.id !== command.since),
+						leafId: "m2",
 					},
 				};
 			case "get_session_stats":
@@ -365,6 +378,15 @@ describe("AgentProcess — transcript", () => {
 		assert.equal(messages.length, 2);
 		assert.deepEqual((messages[0] as { role?: string }).role, "user");
 		assert.deepEqual((messages[1] as { role?: string }).role, "toolResult");
+	});
+
+	it("reads append-ordered session entries through Pi RPC get_entries", async () => {
+		const { agent, fake } = makeAgent({ cwd: "/tmp", label: "inspect" });
+		const page = await agent.getEntries("m1");
+		assert.equal(page.leafId, "m2");
+		assert.equal(page.entries.length, 1);
+		assert.equal((page.entries[0] as { id?: string }).id, "m2");
+		assert.deepEqual(fake.commands.at(-1), { type: "get_entries", since: "m1" });
 	});
 });
 

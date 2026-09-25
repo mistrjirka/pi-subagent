@@ -39,6 +39,12 @@ export interface AgentCompletion {
 	sessionId?: string;
 }
 
+/** Append-ordered Pi session entries, optionally read after a stable entry id. */
+export interface AgentSessionEntryPage {
+	entries: unknown[];
+	leafId: string | null;
+}
+
 export interface AgentProcessOptions {
 	cwd: string;
 	/** Resolved "provider/id" model string, or inherit when omitted. */
@@ -243,6 +249,24 @@ export class AgentProcess {
 		const data = response.data as { messages?: unknown[] } | undefined;
 		if (!data || !Array.isArray(data.messages)) throw new Error("get_messages returned no messages array");
 		return data.messages;
+	}
+
+	/**
+	 * Append-ordered session entries from Pi RPC. `since` is a stable entry id,
+	 * so supervision can advance exactly instead of repeatedly slicing a tail.
+	 */
+	async getEntries(since?: string): Promise<AgentSessionEntryPage> {
+		const response = await this.client.sendCommand({
+			type: "get_entries",
+			...(since ? { since } : {}),
+		});
+		if (!response.success) throw new Error(`get_entries failed: ${response.error}`);
+		const data = response.data as { entries?: unknown[]; leafId?: unknown } | undefined;
+		if (!data || !Array.isArray(data.entries)) throw new Error("get_entries returned no entries array");
+		return {
+			entries: data.entries,
+			leafId: typeof data.leafId === "string" ? data.leafId : null,
+		};
 	}
 
 	/** Best-effort token/tool stats from get_session_stats. */

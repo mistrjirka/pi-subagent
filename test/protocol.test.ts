@@ -19,7 +19,10 @@ describe("serializeCommand", () => {
 	});
 
 	it("serializes get_entries with an optional stable cursor", () => {
-		assert.equal(serializeCommand({ type: "get_entries", since: "entry-42" }), '{"type":"get_entries","since":"entry-42"}\n');
+		assert.equal(
+			serializeCommand({ type: "get_entries", since: "entry-42" }),
+			'{"type":"get_entries","since":"entry-42"}\n',
+		);
 		assert.equal(serializeCommand({ type: "get_entries" }), '{"type":"get_entries"}\n');
 	});
 

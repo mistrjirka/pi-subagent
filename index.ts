@@ -1098,7 +1098,7 @@ export default function (pi: ExtensionAPI) {
 		promptSnippet: "Wait for a background or resumed child to settle",
 		promptGuidelines: [
 			"Use agent_wait when a background child's result becomes the next dependency instead of polling shell/status output.",
-			"For supervision, a 150-second wait window is a useful cadence. On timeout, agent_wait returns the latest activity marker plus an unread transcript page shared with agent_inspect. Previously returned transcript messages are not repeated; if unread messages remain, another wait/inspect continues from that cursor.",
+			"For supervision, a 150-second wait window is a useful cadence. On timeout, agent_wait returns the latest activity marker plus an unread transcript page shared with agent_inspect. Previously returned transcript messages are not repeated. If the page says unread messages remain, drain them immediately with agent_inspect; otherwise wait again when the child is making progress.",
 			"If timeout_seconds is omitted, agent_wait uses a 180-second supervision window. timeout_seconds: 0 returns an immediate live snapshot.",
 			"If agent_wait returns an ask_parent question, answer that same child with agent_send; call agent_wait again only after the answer when you need the resumed result.",
 		],
@@ -1205,8 +1205,8 @@ export default function (pi: ExtensionAPI) {
 		name: "agent_inspect",
 		label: "Inspect Agent",
 		description:
-			"Read a direct child's current state and recent live Pi transcript without stopping, steering, or otherwise changing the child.",
-		promptSnippet: "Inspect a running child's recent transcript",
+			"Read a direct child's current state and the next transcript messages not already returned by agent_wait/agent_inspect. This advances only the parent's transcript cursor; it does not stop or steer the child.",
+		promptSnippet: "Read a running child's next unread transcript page",
 		promptGuidelines: [
 			"Use agent_inspect when supervision needs more evidence than the latest activity marker. It advances the same parent-side transcript cursor as agent_wait but does not change the child.",
 			"max_messages is a page size, not a tail size: unread messages beyond the page stay queued for the next agent_wait/agent_inspect call.",

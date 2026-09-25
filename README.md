@@ -13,7 +13,7 @@ The runtime deliberately does very little orchestration. The **parent Pi decides
 - **All normal Pi tools.** The runtime does not impose per-agent tool allowlists.
 - **Explicit delegation.** A child may spawn only exact agent names listed in its profile's `allowed_subagents`. Omitted means none.
 - **Persistent workers.** A child can stay resident after finishing and be continued with `agent_send` in the same context.
-- **Explicit wait.** `agent_wait` uses a 3-minute supervision window by default (or a caller-chosen window); expiry returns transcript/activity evidence and never stops the child, so shell sleep/poll loops are unnecessary.
+- **Explicit wait.** `agent_wait` uses a 3-minute supervision window by default (or a caller-chosen window); expiry returns latest activity plus the next unread transcript page shared with `agent_inspect`, and never stops the child.
 - **Fallback supervision.** When the root parent ends a turn with a background/resumed child still running, a 3-minute unsupervised clock starts. The reminder includes latest activity plus a short transcript tail and repeats after later idle turns until the parent waits, inspects, steers, stops, or the child settles.
 - **Escalation path.** `ask_parent` lets a child yield on material ambiguity, a non-obvious diagnosis, or a material implementation decision; its immediate parent answers the same resident context with `agent_send`.
 - **PiTTy bridge.** Spawn details expose a small direct-control directory for live inspection, steer, and stop. This does not emulate the old `pi-subagents` workflow runtime.
@@ -282,13 +282,13 @@ Wait for a direct child that is running in the background or has been resumed wi
 { "agent_id": "@max" }
 ```
 
-With no explicit timeout, `agent_wait` uses a **180-second supervision window**. It returns sooner if the child completes/fails/stops or reaches `ask_parent`. If the child settled earlier in the current parent turn, `agent_wait` consumes that cached settlement and suppresses the otherwise-pending completion/question notification, so the same result is not delivered again after the turn. If the child is still running after 3 minutes, it returns a recent transcript/activity snapshot and asks the parent to check progress. The child keeps running. `timeout_seconds` changes only this wait window:
+With no explicit timeout, `agent_wait` uses a **180-second supervision window**. It returns sooner if the child completes/fails/stops or reaches `ask_parent`. If the child settled earlier in the current parent turn, `agent_wait` consumes that cached settlement and suppresses the otherwise-pending completion/question notification, so the same result is not delivered again after the turn. If the child is still running after 3 minutes, it returns latest activity plus only transcript messages not already returned by `agent_wait`/`agent_inspect`, then asks the parent to check progress. The child keeps running. `timeout_seconds` changes only this wait window:
 
 ```json
 { "agent_id": "@max", "timeout_seconds": 150 }
 ```
 
-When the 150-second window expires, the result says the child is still running and includes its latest activity plus a short recent transcript tail. Before calling `agent_wait` again, review that evidence and judge whether the child is making real progress on its task. If it is, another wait is fine; if it looks stuck, is repeating itself, or has wandered off the task, steer it with `agent_send`, inspect it, or stop it. If the short tail is insufficient, call `agent_inspect`. `timeout_seconds: 0` is an immediate status snapshot. Omitting the field uses the 180-second default.
+When the 150-second window expires, the result says the child is still running and includes its latest activity plus an unread transcript page. `agent_wait` and `agent_inspect` share one append-ordered Pi session-entry cursor, so transcript messages already returned by either tool are not repeated. If the page says more unread messages remain, call `agent_inspect` immediately to drain the next page; otherwise judge whether the child is making real progress. If it is, another wait is fine; if it looks stuck, is repeating itself, or has wandered off the task, steer it with `agent_send`, inspect it, or stop it. `timeout_seconds: 0` is an immediate status snapshot. Omitting the field uses the 180-second default.
 
 For root background/resumed children, the runtime also has a fallback supervision reminder: when the root parent ends its turn with a child still running, it starts a 3-minute unsupervised clock. If the parent has not resumed supervision before that window expires, the runtime injects a follow-up telling the parent to check the child and includes the latest activity. A new parent turn pauses the clock; if that turn ends with the child still running, a fresh 3-minute window begins. This is **not** a task timeout and never cancels the child.
 
@@ -296,15 +296,15 @@ Use `agent_wait` instead of shell `sleep`/poll loops.
 
 ### `agent_inspect`
 
-Read a live direct child's state and recent Pi conversation transcript without changing the child:
+Read a live direct child's state and the next unread Pi conversation transcript page without changing the child:
 
 ```json
 { "agent_id": "@max", "max_messages": 12 }
 ```
 
-The preferred transcript source is Pi RPC `get_messages`. If that RPC fails or is temporarily empty, monitoring falls back to the persisted child session and then to the live event stream, and reports which source was used instead of silently presenting an RPC failure as an empty transcript. The transcript includes user/parent follow-ups, full plaintext thinking when Pi provides it, assistant text, tool calls and tool results when available; the event fallback contains thinking/assistant/tool activity but cannot reconstruct past tool-result bodies. Thinking expansion is additive: it does not consume the existing message/tool selection budget, so enabling the full trace does not hide tool rows. `max_messages` defaults to 12 and may be 1–30.
+Incremental reads use Pi RPC `get_entries(since)`, whose stable session-entry id is the cursor. `agent_wait` and `agent_inspect` share that cursor, so each successful read continues exactly after the last consumed page instead of slicing another recent tail. `max_messages` defaults to 12 and may be 1–30; it is a page size, and later unread messages remain for the next read. If `get_entries` fails, the call reports the RPC failure and does **not** advance the cursor, so a retry cannot silently skip messages. The page includes user/parent follow-ups, full plaintext thinking when Pi provides it, assistant text, tool calls and tool results. Thinking expansion is additive: it does not consume the existing message/tool selection budget.
 
-Use `agent_inspect` when a wait-window snapshot is not enough to decide whether the child is making sensible progress. It is read-only and does not pause, steer, resume, or stop the child.
+Use `agent_inspect` when a wait-window page is not enough, or when `agent_wait` reports more unread messages remain. It is read-only with respect to the child: it advances only the parent-side transcript cursor and does not pause, steer, resume, or stop the child.
 
 ### `agent_send`
 

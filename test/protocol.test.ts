@@ -18,6 +18,11 @@ describe("serializeCommand", () => {
 		assert.equal(parsed.streamingBehavior, "steer");
 	});
 
+	it("serializes get_entries with an optional stable cursor", () => {
+		assert.equal(serializeCommand({ type: "get_entries", since: "entry-42" }), '{"type":"get_entries","since":"entry-42"}\n');
+		assert.equal(serializeCommand({ type: "get_entries" }), '{"type":"get_entries"}\n');
+	});
+
 	it("escapes JSON inside the message (quotes, newlines)", () => {
 		const line = serializeCommand({ type: "prompt", message: 'say "hi"\nnext' });
 		const parsed = JSON.parse(line);

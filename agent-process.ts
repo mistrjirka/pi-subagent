@@ -87,6 +87,7 @@ interface AgentProcessDeps {
 }
 
 const STOP_GRACE_MS = 5_000;
+const STARTUP_PROMPT_TIMEOUT_MS = 60_000;
 
 // No task-level limits live here. Explicit stop/host shutdown are the only
 // framework lifecycle controls.
@@ -173,12 +174,14 @@ export class AgentProcess {
 
 	/** Spawn + send the prompt; resolves once the prompt preflight succeeded. */
 	async spawnAndSend(prompt: string): Promise<{ ok: true } | { ok: false; error: string }> {
-		const response = await this.client.sendCommand({ type: "prompt", message: prompt }).catch((err: Error) => ({
-			type: "response" as const,
-			command: "prompt",
-			success: false as const,
-			error: err.message,
-		}));
+		const response = await this.client
+			.sendCommand({ type: "prompt", message: prompt }, STARTUP_PROMPT_TIMEOUT_MS)
+			.catch((err: Error) => ({
+				type: "response" as const,
+				command: "prompt",
+				success: false as const,
+				error: err.message,
+			}));
 
 		if (!response.success) {
 			this.status = "failed";

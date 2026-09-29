@@ -34,7 +34,7 @@ export interface RpcClientOptions {
 	onExit?: () => void;
 }
 
-/** How long to wait for a single command response before failing it. */
+/** How long to wait for a normal command response before failing it. */
 const RESPONSE_TIMEOUT_MS = 10_000;
 
 /**
@@ -122,7 +122,7 @@ export class RpcClient {
 	}
 
 	/** Send one command and await its correlated response. */
-	sendCommand(command: RpcCommand): Promise<RpcResponse> {
+	sendCommand(command: RpcCommand, timeoutMs = RESPONSE_TIMEOUT_MS): Promise<RpcResponse> {
 		// Unique per-command id: the pending map is keyed by id and the child
 		// echoes it back — a shared id (e.g. the agent id) would let a later
 		// command steal an earlier waiter and mismatch responses.
@@ -131,7 +131,7 @@ export class RpcClient {
 			const timer = setTimeout(() => {
 				this.pending.delete(cmd.id);
 				reject(new Error(`RPC timeout waiting for "${command.type}" response`));
-			}, RESPONSE_TIMEOUT_MS);
+			}, timeoutMs);
 
 			this.pending.set(cmd.id, { resolve, reject, timer });
 			const stdin = this.proc.stdin;

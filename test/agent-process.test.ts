@@ -17,6 +17,7 @@ import type { RenderEvent } from "../types.js";
 /** Programmable fake standing in for RpcClient. */
 class FakeClient {
 	commands: Array<{ type: string; message?: string; since?: string }> = [];
+	commandTimeouts: Array<number | undefined> = [];
 	endInputCalls = 0;
 	killCalls = 0;
 	exitCode: number | null = null;
@@ -52,8 +53,9 @@ class FakeClient {
 		this.env = options.env;
 	}
 
-	async sendCommand(command: { type: string; message?: string; since?: string }) {
+	async sendCommand(command: { type: string; message?: string; since?: string }, timeoutMs?: number) {
 		this.commands.push(command);
+		this.commandTimeouts.push(timeoutMs);
 		switch (command.type) {
 			case "prompt":
 				return this.promptOk
@@ -205,6 +207,7 @@ describe("AgentProcess — spawnAndSend", () => {
 			fake.commands.map((c) => c.type),
 			["prompt", "get_state"],
 		);
+		assert.deepEqual(fake.commandTimeouts, [60_000, undefined]);
 	});
 
 	it("fails with the preflight error and stays failed", async () => {

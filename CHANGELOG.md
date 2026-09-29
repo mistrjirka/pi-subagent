@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.6 — tolerate slow child startup without weakening normal RPC timeouts
+
+- Give the initial child `prompt` RPC a 60-second startup window. A child Pi process can legitimately spend several seconds loading global extensions before it can acknowledge the first prompt, and transient cold-cache or lock contention could exceed the previous 10-second limit.
+- Keep every ordinary RPC command at the existing 10-second timeout. Only startup preflight gets the larger window, so a wedged resident child still fails fast during normal supervision/control.
+- Add regression coverage proving the startup prompt receives 60 seconds while the immediately following `get_state` call retains the normal timeout.
+
+Validation: typecheck and the complete test suite pass.
+
 ## 0.5.5 — stable live transcript turn identity
 
 - Tag `events.jsonl` thinking/text/tool records with an additive 1-based `messageSeq` derived from Pi's real assistant `message_start`/`message_end` lifecycle. Repeated block ids such as `think-0` are now distinguishable across assistant turns without using content as identity.

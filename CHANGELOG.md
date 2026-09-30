@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.7 — fix child-to-parent message delivery at the root
+
+- Deliver an inbound child `agent_send` addressed to `@parent` directly into the receiving parent session instead of re-routing it through that session's own parent capability.
+- Fix the root-only false failure where the child first saw `delivered to @parent` and then received `[pi-subagent] agent_send to @parent failed: root session has no parent`.
+- Preserve the existing outbound behavior: a real root session still gets an error if it itself tries to send to `@parent`.
+
+Validation: focused Biome check and TypeScript typecheck; automated tests intentionally not run because testing is user-opt-in.
+
 ## 0.5.6 — tolerate slow child startup without weakening normal RPC timeouts
 
 - Give the initial child `prompt` RPC a 60-second startup window. A child Pi process can legitimately spend several seconds loading global extensions before it can acknowledge the first prompt, and transient cold-cache or lock contention could exceed the previous 10-second limit.

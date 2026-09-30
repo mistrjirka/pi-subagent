@@ -1,6 +1,6 @@
 {
 	"name": "@mistrjirka/pi-subagent",
-	"version": "0.5.6",
+	"version": "0.5.7",
 	"description": "Profile-driven uncapped subagent runtime for Pi",
 	"keywords": [
 		"pi-package"

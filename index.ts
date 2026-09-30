@@ -382,6 +382,23 @@ async function handleMessage(
 	msg: AgentMessage,
 	outbound: boolean,
 ): Promise<{ ok: boolean; verb?: string; error?: string }> {
+	if (!outbound && msg.to === "@parent") {
+		// A child addressing "@parent" means this receiving session. Do not
+		// re-route it using this process's own parent capability: at the root
+		// that would incorrectly turn a successful child→root delivery into
+		// "root session has no parent".
+		pi.sendMessage(
+			{
+				customType: "subagent-message",
+				content: `${formatFrom(msg.from)}${msg.message}`,
+				display: true,
+				details: { from: msg.from, message: msg.message },
+			},
+			{ deliverAs: "steer", triggerTurn: true },
+		);
+		return { ok: true, verb: "delivered" };
+	}
+
 	const d = registry.route(msg);
 	switch (d.kind) {
 		case "child": {
@@ -392,22 +409,8 @@ async function handleMessage(
 			return ok ? { ok: true, verb: "delivered" } : { ok: false, error: `delivery to ${d.childId} failed` };
 		}
 		case "parent": {
-			if (outbound) {
-				// I am addressing my own parent — point-to-point up; the parent's
-				// extension injects it into its LLM session.
-				uiRef?.setStatus(MSG_STATUS_KEY, JSON.stringify(d.message));
-				return { ok: true, verb: "delivered" };
-			}
-			// My child addressed "@parent" (= me): inject into my session.
-			pi.sendMessage(
-				{
-					customType: "subagent-message",
-					content: `${formatFrom(d.message.from)}${d.message.message}`,
-					display: true,
-					details: { from: d.message.from, message: d.message.message },
-				},
-				{ deliverAs: "steer", triggerTurn: true },
-			);
+			// Outbound only: inbound child→parent delivery is handled above.
+			uiRef?.setStatus(MSG_STATUS_KEY, JSON.stringify(d.message));
 			return { ok: true, verb: "delivered" };
 		}
 		case "error": {

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { TSchema } from "typebox";
-import { buildSpawnParamsSchema, canDelegate } from "../index.js";
+import { buildSpawnParamsSchema, canDelegate, shouldRunInBackground } from "../index.js";
 
 function keys(schema: TSchema): string[] {
 	return Object.keys((schema as { properties: Record<string, unknown> }).properties);
@@ -30,6 +30,20 @@ describe("buildSpawnParamsSchema", () => {
 		const k = keys(buildSpawnParamsSchema(true));
 		assert.ok(!k.includes("run_in_background"));
 		assert.deepEqual(k.sort(), ["agent", "label", "persistent", "prompt"].sort());
+	});
+});
+
+describe("root spawn scheduling", () => {
+	it("defaults omitted background choice to asynchronous execution", () => {
+		assert.equal(shouldRunInBackground(false, undefined), true);
+		assert.equal(shouldRunInBackground(false, true), true);
+		assert.equal(shouldRunInBackground(false, false), false);
+	});
+
+	it("keeps nested spawns foreground regardless of request", () => {
+		assert.equal(shouldRunInBackground(true, undefined), false);
+		assert.equal(shouldRunInBackground(true, true), false);
+		assert.equal(shouldRunInBackground(true, false), false);
 	});
 });
 

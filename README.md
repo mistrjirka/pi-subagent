@@ -270,7 +270,7 @@ Parameters:
 - `prompt` — concrete task. The stable role prompt comes from the profile.
 - `label` — optional UI label; defaults to the profile name.
 - `persistent` — keep the same child context resident after completion.
-- `run_in_background` — root-only execution choice. `true` detaches and returns an agent id; false/omitted waits in foreground. Nested spawns are always foreground.
+- `run_in_background` — root-only execution choice. Omitted or `true` detaches and returns an agent id; `false` waits in foreground. Nested spawns are always foreground.
 
 Nested agents do not get `run_in_background`; their parent waits for them directly.
 

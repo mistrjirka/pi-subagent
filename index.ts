@@ -255,6 +255,10 @@ export function canDelegate(hasParent: boolean, allowedSubagents: readonly strin
 	return !hasParent || allowedSubagents.length > 0;
 }
 
+export function shouldRunInBackground(hasParent: boolean, requested: boolean | undefined): boolean {
+	return hasParent ? false : requested !== false;
+}
+
 export function buildSpawnParamsSchema(hasParent: boolean): ReturnType<typeof Type.Object> {
 	return Type.Object({
 		agent: SpawnAgentField,
@@ -272,7 +276,7 @@ export function buildSpawnParamsSchema(hasParent: boolean): ReturnType<typeof Ty
 					run_in_background: Type.Optional(
 						Type.Boolean({
 							description:
-								"Root-only execution choice. true returns immediately; false/omitted waits in foreground. Nested agents are always foreground.",
+								"Root-only execution choice. Omitted/true returns immediately in background; false waits in foreground. Nested agents are always foreground.",
 						}),
 					),
 				}),
@@ -603,7 +607,7 @@ export default function (pi: ExtensionAPI) {
 						isError: true,
 					};
 				}
-				const runInBackground = HAS_PARENT ? false : params.run_in_background === true;
+				const runInBackground = shouldRunInBackground(HAS_PARENT, params.run_in_background);
 				const task = params.prompt?.trim();
 				if (!task) {
 					return {

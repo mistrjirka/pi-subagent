@@ -4,6 +4,7 @@
 
 - Preserve a resumed `ask_parent` child's final answer when it finishes. The wake-completion path now records the real completion through the normal registry policy before tearing down a non-persistent child, instead of racing `stopAndRemove()` and returning a synthetic `Agent stopped.` to an active `agent_wait`.
 - Apply the same ordering to failed resumed turns so the parent receives the real failure rather than having it replaced by an explicit-stop settlement.
+- Make root-level spawns asynchronous by default: omitted or `true` `run_in_background` detaches, while explicit `false` keeps the child foreground. Nested delegation remains foreground-only.
 
 ## 0.5.7 — fix child-to-parent message delivery at the root
 

@@ -46,4 +46,20 @@ describe("supervision wording stays plain", () => {
 		assert.ok(!indexSource.includes('pi.on("agent_end", () => registry.parentBecameIdle())'));
 		assert.ok(indexSource.includes("current !== agent"), "stale reminder re-check missing");
 	});
+
+	it("records resumed child completion before normal cleanup", () => {
+		const start = indexSource.indexOf('onIdle: (outcome) => {');
+		const end = indexSource.indexOf("// Where live output goes", start);
+		assert.ok(start >= 0 && end > start, "could not locate resumed-child lifecycle block");
+		const onIdle = indexSource.slice(start, end);
+		assert.ok(onIdle.includes('wakeCompletion("completed")'), "resumed completion is not collected");
+		assert.ok(
+			onIdle.includes("registry.complete(agent, completion)"),
+			"resumed completion bypasses normal completion policy",
+		);
+		assert.ok(
+			!onIdle.includes("registry.stopAndRemove(agentId)"),
+			"resumed completion can still be relabeled as stopped",
+		);
+	});
 });

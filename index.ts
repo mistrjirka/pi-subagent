@@ -702,14 +702,6 @@ export default function (pi: ExtensionAPI) {
 						sessionId: agent.sessionId,
 					} as const;
 				};
-				const settleWake = async (status: "completed" | "failed"): Promise<void> => {
-					const completion = await wakeCompletion(status);
-					registry.recordSettlement(
-						agentId,
-						{ completion },
-						agent.stoppedByControl ? undefined : () => notifyCompletion(pi, agent, completion),
-					);
-				};
 				const live = createLiveChannels({
 					// getWidget, not widget: the widget is created on first use, so a
 					// captured reference would be null for every update before that.
@@ -790,18 +782,25 @@ export default function (pi: ExtensionAPI) {
 									.catch(() => {});
 								return;
 							}
-							void settleWake("completed").catch(() => {});
-							if (agent.persistent) {
-								registry.markIdle(agentId);
-							} else {
-								tree.remove(agentId, "done");
-								void registry.stopAndRemove(agentId).catch(() => {});
-							}
+							// A resumed ask_parent turn is a normal completion, not an
+							// explicit stop. Finish collecting its output and record the
+							// settlement before normal cleanup. Calling stopAndRemove here
+							// races wakeCompletion(): markStopped() can otherwise overwrite
+							// the just-produced final answer with a synthetic "stopped"
+							// settlement before agent_wait receives it.
+							void wakeCompletion("completed")
+								.then(async (completion) => {
+									await registry.complete(agent, completion);
+									if (!agent.persistent) tree.remove(agentId, "done");
+								})
+								.catch(() => {});
 							return;
 						}
-						void settleWake("failed")
-							.then(() => tree.remove(agentId, "failed"))
-							.then(() => registry.stopAndRemove(agentId))
+						void wakeCompletion("failed")
+							.then(async (completion) => {
+								await registry.complete(agent, completion);
+								tree.remove(agentId, "failed");
+							})
 							.catch(() => {});
 					},
 					// Where live output goes lives in live-output.ts: the widget row and

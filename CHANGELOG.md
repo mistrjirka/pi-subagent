@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Preserve a resumed `ask_parent` child's final answer when it finishes. The wake-completion path now records the real completion through the normal registry policy before tearing down a non-persistent child, instead of racing `stopAndRemove()` and returning a synthetic `Agent stopped.` to an active `agent_wait`.
+- Apply the same ordering to failed resumed turns so the parent receives the real failure rather than having it replaced by an explicit-stop settlement.
+
 ## 0.5.7 — fix child-to-parent message delivery at the root
 
 - Deliver an inbound child `agent_send` addressed to `@parent` directly into the receiving parent session instead of re-routing it through that session's own parent capability.

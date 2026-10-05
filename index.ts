@@ -1,3 +1,4 @@
+import { reportedAgentState } from "./agent-state.js";
 /**
  * pi-subagent — spawn isolated sub‑agent pi instances + in-tree messaging.
  *
@@ -409,8 +410,11 @@ async function handleMessage(
 			// Point-to-point delivery to a direct child. Cross-level coordination
 			// is the LLM's job: it addresses only ids it knows, hop by hop.
 			const text = `${formatFrom(d.message.from)}${d.message.message}`;
+			const queued = registry.lookup(d.childId)?.status === "running";
 			const ok = await registry.deliver(d.childId, text);
-			return ok ? { ok: true, verb: "delivered" } : { ok: false, error: `delivery to ${d.childId} failed` };
+			return ok
+				? { ok: true, verb: queued ? "queued" : "accepted" }
+				: { ok: false, error: `delivery to ${d.childId} failed` };
 		}
 		case "parent": {
 			// Outbound only: inbound child→parent delivery is handled above.
@@ -439,6 +443,8 @@ export default function (pi: ExtensionAPI) {
 	pi.on("tool_result", async (event) => {
 		if (
 			event.toolName !== "agent_spawn" &&
+			event.toolName !== "agent_wait" &&
+			event.toolName !== "agent_inspect" &&
 			event.toolName !== "agent_stop" &&
 			event.toolName !== "agent_send" &&
 			event.toolName !== "ask_parent"
@@ -501,7 +507,7 @@ export default function (pi: ExtensionAPI) {
 								details: {
 									agentId: agent.agentId,
 									label: agent.label,
-									state: agent.status ?? "running",
+									state: reportedAgentState(agent),
 									activity: agent.getLatestActivity?.(),
 									transcript: transcript.text,
 									transcriptSource: transcript.source,
@@ -692,20 +698,9 @@ export default function (pi: ExtensionAPI) {
 						{ deliverAs: "followUp", triggerTurn: true },
 					);
 				};
-				const wakeCompletion = async (status: "completed" | "failed") => {
-					const [output, stats] = await Promise.all([agent.lastOutput(), agent.getStats()]);
-					return {
-						status,
-						output: output || (status === "failed" ? "Follow-up turn failed (model API error)." : output),
-						stats: {
-							tokens: stats?.tokens ?? 0,
-							toolUses: stats?.toolUses ?? 0,
-							durationMs: Date.now() - agent.startedAt,
-						},
-						sessionPath: agent.sessionPath,
-						sessionId: agent.sessionId,
-					} as const;
-				};
+				const wakeCompletion = (status: "completed" | "failed", generation: number) =>
+					agent.completionForTurn(status, generation);
+
 				const live = createLiveChannels({
 					// getWidget, not widget: the widget is created on first use, so a
 					// captured reference would be null for every update before that.
@@ -765,13 +760,14 @@ export default function (pi: ExtensionAPI) {
 					// agent_send "delivered" alone would leave the answer unread.
 					// Deliberate stops stay silent (stoppedByControl). A failed
 					// follow-up is reported (abnormal end) then cleaned up.
-					onIdle: (outcome) => {
+					onIdle: (outcome, generation) => {
 						if (outcome === "completed") {
 							if (agent.awaitingParent && agent.pendingQuestion) {
-								pendingQuestion = agent.pendingQuestion;
-								void wakeCompletion("completed")
+								const question = agent.pendingQuestion;
+								pendingQuestion = question;
+								void wakeCompletion("completed", generation)
 									.then((completion) => {
-										const question = agent.pendingQuestion;
+										if (!registry.acceptsCompletion(agent, completion)) return;
 										registry.recordSettlement(
 											agentId,
 											{
@@ -783,7 +779,16 @@ export default function (pi: ExtensionAPI) {
 										);
 										registry.markIdle(agentId);
 									})
-									.catch(() => {});
+									.catch((error) => {
+										pi.sendMessage(
+											{
+												customType: "subagent-error",
+												content: `Subagent @${agentId} completion failed: ${String(error)}`,
+												display: true,
+											},
+											{ deliverAs: "followUp", triggerTurn: true },
+										);
+									});
 								return;
 							}
 							// A resumed ask_parent turn is a normal completion, not an
@@ -792,20 +797,38 @@ export default function (pi: ExtensionAPI) {
 							// races wakeCompletion(): markStopped() can otherwise overwrite
 							// the just-produced final answer with a synthetic "stopped"
 							// settlement before agent_wait receives it.
-							void wakeCompletion("completed")
+							void wakeCompletion("completed", generation)
 								.then(async (completion) => {
-									await registry.complete(agent, completion);
-									if (!agent.persistent) tree.remove(agentId, "done");
+									const accepted = await registry.complete(agent, completion);
+									if (accepted && !agent.persistent) tree.remove(agentId, "done");
 								})
-								.catch(() => {});
+								.catch((error) => {
+									pi.sendMessage(
+										{
+											customType: "subagent-error",
+											content: `Subagent @${agentId} completion failed: ${String(error)}`,
+											display: true,
+										},
+										{ deliverAs: "followUp", triggerTurn: true },
+									);
+								});
 							return;
 						}
-						void wakeCompletion("failed")
+						void wakeCompletion("failed", generation)
 							.then(async (completion) => {
-								await registry.complete(agent, completion);
+								if (!(await registry.complete(agent, completion))) return;
 								tree.remove(agentId, "failed");
 							})
-							.catch(() => {});
+							.catch((error) => {
+								pi.sendMessage(
+									{
+										customType: "subagent-error",
+										content: `Subagent @${agentId} completion failed: ${String(error)}`,
+										display: true,
+									},
+									{ deliverAs: "followUp", triggerTurn: true },
+								);
+							});
 					},
 					// Where live output goes lives in live-output.ts: the widget row and
 					// the tree fold hear about every update (a woken resident agent has a
@@ -876,6 +899,7 @@ export default function (pi: ExtensionAPI) {
 									.waitForCompletion()
 									.then((completion) => {
 										const child = a as AgentProcess;
+										if (!registry.acceptsCompletion(child, completion)) return;
 										if (completion.status === "completed" && child.awaitingParent && child.pendingQuestion) {
 											const question = child.pendingQuestion;
 											pendingQuestion = question;
@@ -1153,15 +1177,15 @@ export default function (pi: ExtensionAPI) {
 						{
 							type: "text",
 							text:
-								`${window}; ${atId(agentId)} is still ${live.status ?? "running"}. Latest activity: ${activitySummary(activity)}. ` +
+								`${window}; ${atId(agentId)} is still ${reportedAgentState(live)}. Latest activity: ${activitySummary(activity)}. ` +
 								"The wait window did not stop the agent. SUPERVISION CHECK REQUIRED: use the latest activity and unread transcript below to judge whether the child is making real progress before waiting again. " +
 								"If it is, wait again; if it looks stuck, is repeating itself, or has wandered off the task, steer it with agent_send, inspect it, or stop it." +
-								`\n\nUnread transcript (${transcript.returnedMessages} shown${transcript.hasMore ? `, ${transcript.remainingMessages} still unread` : ""}; ${transcript.source}):\n${transcript.text}`,
+								`\n\nUnread transcript (${transcript.returnedMessages} shown${transcript.hasMore ? `, ${transcript.remainingMessagesExact === false ? "at least " : ""}${transcript.remainingMessages} still unread` : ""}; ${transcript.source}):\n${transcript.text}`,
 						},
 					],
 					details: {
 						agentId,
-						state: live.status ?? "running",
+						state: reportedAgentState(live),
 						timedOut: timeoutSeconds !== 0,
 						timeoutSeconds,
 						activity,
@@ -1198,6 +1222,7 @@ export default function (pi: ExtensionAPI) {
 				details: {
 					agentId,
 					state: completion.status,
+					error: completion.status === "completed" ? undefined : completion.output || completion.status,
 					sessionPath: completion.sessionPath,
 					sessionId: completion.sessionId,
 					endedAt: Date.now(),
@@ -1227,7 +1252,24 @@ export default function (pi: ExtensionAPI) {
 			const agentId = rawId?.replace(/^@/, "");
 			if (!agentId) return toErrorResult("`agent_id` is required.");
 			const agent = registry.lookup(agentId);
-			if (!agent) return toErrorResult(`Unknown or no-longer-live direct child ${atId(agentId)}.`);
+			if (!agent) {
+				const settled = registry.peekSettlement(agentId);
+				if (!settled) return toErrorResult(`Unknown direct child ${atId(agentId)}.`);
+				return {
+					content: [
+						{
+							type: "text",
+							text: `${atId(agentId)} — ${settled.completion.status}; process exited.\n\n${truncateForContext(settled.completion.output)}`,
+						},
+					],
+					details: {
+						agentId,
+						state: settled.completion.status,
+						archived: true,
+						sessionPath: settled.completion.sessionPath,
+					},
+				};
+			}
 			const maxMessages = params.max_messages ?? 12;
 			if (!Number.isInteger(maxMessages) || maxMessages < 1 || maxMessages > 30) {
 				return toErrorResult("`max_messages` must be an integer from 1 to 30.");
@@ -1244,16 +1286,17 @@ export default function (pi: ExtensionAPI) {
 				content: [
 					{
 						type: "text",
-						text: `${atId(agentId)} — ${agent.status ?? "running"}; latest activity: ${activitySummary(activity)}\n\nUnread transcript (${transcript.returnedMessages} shown${transcript.hasMore ? `, ${transcript.remainingMessages} still unread` : ""}; ${transcript.source}):\n${transcript.text}`,
+						text: `${atId(agentId)} — ${reportedAgentState(agent)}; latest activity: ${activitySummary(activity)}\n\nUnread transcript (${transcript.returnedMessages} shown${transcript.hasMore ? `, ${transcript.remainingMessagesExact === false ? "at least " : ""}${transcript.remainingMessages} still unread` : ""}; ${transcript.source}):\n${transcript.text}`,
 					},
 				],
 				details: {
 					agentId,
 					label: agent.label,
-					state: agent.status ?? "running",
+					state: reportedAgentState(agent),
 					activity,
 					transcript: transcript.text,
 					transcriptSource: transcript.source,
+					error: transcript.rpcError,
 					returnedMessages: transcript.returnedMessages,
 					remainingMessages: transcript.remainingMessages,
 					elapsedMs,
@@ -1444,19 +1487,21 @@ export default function (pi: ExtensionAPI) {
 	pi.registerMessageRenderer("subagent-notification", renderNotification);
 
 	// ── Cleanup on exit ─────────────────────────────────
-	pi.on("session_shutdown", async (event) => {
+	pi.on("session_shutdown", async () => {
 		// Quit: the whole process is ending. Reload: pi rebuilds the extension
 		// runtime in the same process — emitSessionShutdownEvent(reason:"reload")
 		// fires on the OLD runner before it is invalidated, so this handler still
 		// owns the registry and can stop its sub-agents cleanly; otherwise a
 		// /reload would leave resident rpc children whose stdin pipe stays open.
-		if (event.reason !== "quit" && event.reason !== "reload") return;
 
 		// Graceful stop of every tracked agent. Children exit on their own
 		// (stdin EOF → rpc shutdown) even if the parent dies first, because
 		// the pipe closes — no tmux, no disk cleanup, no signals.
-		await registry.shutdown();
-		for (const bridge of controlBridges) bridge.cleanup();
-		controlBridges.clear();
+		try {
+			await registry.shutdown();
+		} finally {
+			for (const bridge of controlBridges) bridge.cleanup();
+			controlBridges.clear();
+		}
 	});
 }

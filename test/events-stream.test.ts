@@ -52,6 +52,16 @@ function feed(bridge: ExternalControlBridge, assistantMessageEvent: Record<strin
 	for (const ev of interpretEvent({ type: "message_update", assistantMessageEvent })) bridge.appendEvents(ev);
 }
 
+function execution(
+	bridge: ExternalControlBridge,
+	type: "tool_execution_start" | "tool_execution_end",
+	toolCallId = "call-1",
+	toolName = "bash",
+	args = {},
+) {
+	for (const ev of interpretEvent({ type, toolCallId, toolName, args, isError: false })) bridge.appendEvents(ev);
+}
+
 function readLines(bridge: ExternalControlBridge): ChildStreamLine[] {
 	const raw = fs.readFileSync(bridge.eventsPath, "utf8");
 	assert.ok(raw === "" || raw.endsWith("\n"), "every line is newline-terminated");
@@ -161,6 +171,9 @@ describe("events.jsonl — envelope and writer rules", () => {
 			contentIndex: 1,
 			toolCall: { name: "bash", arguments: { command: "ls" }, id: "call-1" },
 		});
+		bridge.flushEvents();
+		execution(bridge, "tool_execution_start");
+		execution(bridge, "tool_execution_end");
 		bridge.flushEvents();
 		const lines = readLines(bridge);
 		assert.equal(lines.length, 4);
@@ -282,12 +295,8 @@ describe("events.jsonl — 2 MB cap", () => {
 
 		feed(bridge, { type: "text_delta", contentIndex: 0, delta: "past the cap" });
 		feed(bridge, { type: "thinking_delta", contentIndex: 0, delta: "also past" });
-		feed(bridge, { type: "toolcall_start", contentIndex: 1, id: "call-9", toolName: "bash" });
-		feed(bridge, {
-			type: "toolcall_end",
-			contentIndex: 1,
-			toolCall: { name: "bash", arguments: { command: "ls" }, id: "call-9" },
-		});
+		execution(bridge, "tool_execution_start", "call-9", "bash");
+		execution(bridge, "tool_execution_end", "call-9", "bash");
 		bridge.flushEvents();
 		const lines = readLines(bridge);
 		assert.deepEqual(
@@ -369,12 +378,8 @@ describe("events.jsonl — reader semantics (PiTTy contract)", () => {
 		feed(bridge, { type: "thinking_delta", contentIndex: 0, delta: "think" });
 		feed(bridge, { type: "text_delta", contentIndex: 0, delta: "answer " });
 		feed(bridge, { type: "text_delta", contentIndex: 0, delta: "here" });
-		feed(bridge, { type: "toolcall_start", contentIndex: 2, id: "call-7", toolName: "read" });
-		feed(bridge, {
-			type: "toolcall_end",
-			contentIndex: 2,
-			toolCall: { name: "read", arguments: { path: "a.ts" }, id: "call-7" },
-		});
+		execution(bridge, "tool_execution_start", "call-7", "read");
+		execution(bridge, "tool_execution_end", "call-7", "read");
 		bridge.flushEvents();
 
 		const items = tailFile(bridge.eventsPath);
@@ -395,5 +400,48 @@ describe("events.jsonl — reader semantics (PiTTy contract)", () => {
 		const items = tailFile(bridge.eventsPath);
 		assert.equal(items.length, 1, "unknown kind ignored, torn line ignored");
 		assert.equal(items[0]?.text, "kept");
+	});
+});
+
+describe("events.jsonl — actual command execution", () => {
+	it("does not finish a long-running command when its arguments finish streaming", () => {
+		const bridge = makeBridge();
+		feed(bridge, { type: "toolcall_start", id: "joy-command", toolName: "bash" });
+		feed(bridge, {
+			type: "toolcall_end",
+			toolCall: { id: "joy-command", name: "bash", arguments: { command: "python evaluation.py", timeout: 2100 } },
+		});
+		bridge.flushEvents();
+		assert.equal(readLines(bridge).length, 0);
+		execution(bridge, "tool_execution_start", "joy-command", "bash", {
+			command: "python evaluation.py",
+			timeout: 2100,
+		});
+		bridge.flushEvents();
+		const start = JSON.parse(fs.readFileSync(bridge.eventsPath, "utf8").trim());
+		assert.equal(start.kind, "tool_start");
+		assert.equal(start.timeoutSeconds, 2100);
+		assert.equal(start.argsPreview, "python evaluation.py");
+		const status = JSON.parse(fs.readFileSync(bridge.statusPath, "utf8"));
+		assert.equal(status.activeTools[0].toolCallId, "joy-command");
+		assert.equal(status.activeTools[0].timeoutSeconds, 2100);
+		execution(bridge, "tool_execution_end", "joy-command");
+		bridge.flushEvents();
+		assert.deepEqual(
+			readLines(bridge).map((line) => line.kind),
+			["tool_start", "tool_end"],
+		);
+		assert.equal(JSON.parse(fs.readFileSync(bridge.statusPath, "utf8")).activeTools, undefined);
+	});
+	it("finishing one parallel tool retains the other active tool", () => {
+		const bridge = makeBridge();
+		execution(bridge, "tool_execution_start", "a");
+		execution(bridge, "tool_execution_start", "b");
+		execution(bridge, "tool_execution_end", "a");
+		const status = JSON.parse(fs.readFileSync(bridge.statusPath, "utf8"));
+		assert.deepEqual(
+			status.activeTools.map((tool: { toolCallId: string }) => tool.toolCallId),
+			["b"],
+		);
 	});
 });

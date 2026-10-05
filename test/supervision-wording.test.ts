@@ -48,11 +48,11 @@ describe("supervision wording stays plain", () => {
 	});
 
 	it("records resumed child completion before normal cleanup", () => {
-		const start = indexSource.indexOf('onIdle: (outcome) => {');
+		const start = indexSource.indexOf("onIdle: (outcome, generation) => {");
 		const end = indexSource.indexOf("// Where live output goes", start);
 		assert.ok(start >= 0 && end > start, "could not locate resumed-child lifecycle block");
 		const onIdle = indexSource.slice(start, end);
-		assert.ok(onIdle.includes('wakeCompletion("completed")'), "resumed completion is not collected");
+		assert.ok(onIdle.includes('wakeCompletion("completed", generation)'), "resumed completion is not collected");
 		assert.ok(
 			onIdle.includes("registry.complete(agent, completion)"),
 			"resumed completion bypasses normal completion policy",

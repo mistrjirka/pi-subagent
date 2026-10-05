@@ -18,7 +18,7 @@ The runtime deliberately does very little orchestration. The **parent Pi decides
 - **Escalation path.** `ask_parent` lets a child yield on material ambiguity, a non-obvious diagnosis, or a material implementation decision; its immediate parent answers the same resident context with `agent_send`.
 - **PiTTy bridge.** Spawn details expose a small direct-control directory for live inspection, steer, and stop. This does not emulate the old `pi-subagents` workflow runtime.
 
-The only forced termination paths are an explicit `agent_stop`, a user/parent abort of a foreground tool call, model/process failure, or shutdown of the hosting Pi process.
+The only forced termination paths are an explicit `agent_stop`, a user/parent abort of a foreground tool call, model/process failure, or teardown of the hosting Pi session (including new/resume/fork transitions).
 
 ## Agent profiles
 
@@ -302,13 +302,15 @@ Read a live direct child's state and the next unread Pi conversation transcript 
 { "agent_id": "@max", "max_messages": 12 }
 ```
 
-Incremental reads use Pi RPC `get_entries(since)`, whose stable session-entry id is the cursor. `agent_wait` and `agent_inspect` share that cursor, so each successful read continues exactly after the last consumed page instead of slicing another recent tail. `max_messages` defaults to 12 and may be 1–30; it is a page size, and later unread messages remain for the next read. If `get_entries` fails, the call reports the RPC failure and does **not** advance the cursor, so a retry cannot silently skip messages. The page includes user/parent follow-ups, full plaintext thinking when Pi provides it, assistant text, tool calls and tool results. Thinking expansion is additive: it does not consume the existing message/tool selection budget.
+Incremental reads page the persisted child session first and use Pi RPC `get_entries(since)` when that file is unavailable. `agent_wait` and `agent_inspect` share one cursor: each successful read continues after the last consumed page. `max_messages` defaults to 12 and may be 1–30; later unread messages remain for the next read. The cursor is committed only after formatting. Read failures are reported as errors and do not consume unread messages. A partial append stays unread until its newline arrives. Bounded scans may report an **at least** unread count.
+
+Pages include parent follow-ups, assistant text, tool calls, tool results, and available plaintext thinking. The **final character budget includes reasoning and omission markers**; reasoning uses spare space within the selected message rather than expanding the output beyond the limit. Full traces remain in the child session and live UI. Completed children remain inspectable through their cached result.
 
 Use `agent_inspect` when a wait-window page is not enough, or when `agent_wait` reports more unread messages remain. It is read-only with respect to the child: it advances only the parent-side transcript cursor and does not pause, steer, resume, or stop the child.
 
 ### `agent_send`
 
-Send new instructions to a direct child. If it is idle/persistent or waiting after `ask_parent`, the same context wakes and continues.
+Send new instructions to a direct child. If it is idle/persistent or waiting after `ask_parent`, the same context wakes and continues. A running child reports the message as **queued**; an idle child reports it as **accepted**. These acknowledgements confirm prompt acceptance, not that the child has acted on the message.
 
 ```json
 {
@@ -367,7 +369,7 @@ control/stop.json
 {"v":1,"seq":4,"ts":1789657747000,"runId":"max","messageSeq":1,"kind":"tool_end","toolName":"bash","toolCallId":"call-3"}
 ```
 
-`kind` is `thinking`, `text`, `tool_start` or `tool_end`. `messageSeq` is the 1-based assistant-message sequence for the child run; together with `blockId` it gives external readers a stable turn-local identity even though content indexes such as `think-0` repeat on later assistant messages. A `thinking`/`text` line carries an incremental `text` chunk plus that turn-local `blockId`. Writes are coalesced — flushed on a kind change, every 250 ms, or past roughly 4 KB — and text stops at a 2 MB cap while tool rows keep flowing, so no reader should assume `seq` is contiguous. Readers must ignore a torn trailing line and unknown fields. The file is created with the run and removed with the `controlDir`, so its absence after a Pi restart is expected rather than an error.
+`kind` is `thinking`, `text`, `tool_start` or `tool_end`. Tool start/end describe actual execution, not model argument generation. Starts include argsPreview and an explicit bash timeoutSeconds when supplied; ends include isError. status.json exposes currently executing tools through optional activeTools entries (id, name, start time, explicit timeout). A status heartbeat confirms the bridge is alive, not that work has progressed. `messageSeq` is the 1-based assistant-message sequence for the child run; together with `blockId` it gives external readers a stable turn-local identity even though content indexes such as `think-0` repeat on later assistant messages. A `thinking`/`text` line carries an incremental `text` chunk plus that turn-local `blockId`. Writes are coalesced — flushed on a kind change, every 250 ms, or past roughly 4 KB — and text stops at a 2 MB cap while tool rows keep flowing, so no reader should assume `seq` is contiguous. Readers must ignore a torn trailing line and unknown fields. The file is created with the run and removed with the `controlDir`, so its absence after a Pi restart is expected rather than an error.
 
 The bridge supports direct **steer** and **stop**. It intentionally does not invent pause/resume semantics that Pi itself does not provide for these resident RPC children.
 

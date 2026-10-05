@@ -34,6 +34,8 @@ export interface RegisteredAgent {
 	readonly model?: string;
 	readonly thinking?: string;
 	readonly startedAt?: number;
+	readonly generation?: number;
+	readonly awaitingParent?: boolean;
 	status?: "queued" | "running" | "completed" | "failed" | "stopped";
 	/** Resident after completion (idle) — explicit opt-in; complete() keeps it. */
 	readonly persistent?: boolean;
@@ -161,6 +163,9 @@ export class AgentRegistry {
 	private readonly supervisionTimers = new Map<string, ReturnType<typeof setTimeout>>();
 	private readonly supervisedAgents = new Set<string>();
 	private parentActive = true;
+	private closing = false;
+	private shutdownPromise: Promise<void> | undefined;
+	private readonly stoppedIds = new Set<string>();
 	private readonly activeWaits = new Map<string, number>();
 	private readonly lastSupervisedAt = new Map<string, number>();
 	/** Names handed out this session — re-roll on collision (pool ~200). */
@@ -197,6 +202,7 @@ export class AgentRegistry {
 
 	/** Track a background agent: registry entry + widget row. */
 	register(agent: RegisteredAgent, status: "running" | "idle" = "running"): void {
+		if (this.closing) throw new Error("Cannot register a child in a closing session.");
 		this.settlements.delete(agent.agentId);
 		this.agents.set(agent.agentId, agent);
 		this.getWidget()?.add(agent, status);
@@ -206,6 +212,20 @@ export class AgentRegistry {
 		return this.agents.get(agentId);
 	}
 
+	/** Known completed tasks remain inspectable after their processes exit. */
+	peekSettlement(agentId: string): AgentSettlement | undefined {
+		return this.settlements.get(agentId);
+	}
+
+	acceptsCompletion(agent: RegisteredAgent, completion: AgentCompletion): boolean {
+		return (
+			!this.closing &&
+			!this.stoppedIds.has(agent.agentId) &&
+			(!agent.stoppedByControl || completion.status === "stopped") &&
+			(completion.generation === undefined || completion.generation === agent.generation)
+		);
+	}
+
 	/**
 	 * Record a child turn settling and wake explicit agent_wait callers.
 	 * If nobody is already waiting, an optional announcement is either sent
@@ -213,6 +233,13 @@ export class AgentRegistry {
 	 * settles. A later cached agent_wait consumes and cancels that announcement.
 	 */
 	recordSettlement(agentId: string, settlement: AgentSettlement, announce?: () => Promise<void> | void): boolean {
+		const live = this.agents.get(agentId);
+		if (
+			this.closing ||
+			(this.stoppedIds.has(agentId) && settlement.completion.status !== "stopped") ||
+			(live && settlement.completion.generation !== undefined && settlement.completion.generation !== live.generation)
+		)
+			return false;
 		this.stopSupervision(agentId);
 		// A new settlement supersedes any unannounced result from an earlier turn.
 		this.pendingAnnouncements.delete(agentId);
@@ -397,7 +424,8 @@ export class AgentRegistry {
 	 * completed stays registered (idle, process resident) — agent_stop
 	 * removes it later.
 	 */
-	async complete(agent: RegisteredAgent, completion: AgentCompletion): Promise<void> {
+	async complete(agent: RegisteredAgent, completion: AgentCompletion): Promise<boolean> {
+		if (!this.acceptsCompletion(agent, completion)) return false;
 		this.recordSettlement(
 			agent.agentId,
 			{ completion },
@@ -408,10 +436,11 @@ export class AgentRegistry {
 			// recordSettlement: immediate when the parent is idle, deferred while
 			// active, or suppressed if agent_wait consumes the settlement first.
 			this.getWidget()?.setStatus?.(agent.agentId, "idle");
-			return;
+			return true;
 		}
 		this.remove(agent.agentId, completion.status === "completed" ? "done" : completion.status);
-		await agent.stop().catch(() => {});
+		await agent.stop();
+		return true;
 	}
 
 	/**
@@ -425,17 +454,30 @@ export class AgentRegistry {
 
 	/** Point-to-point delivery to a direct child by exact id. */
 	async deliver(target: string, text: string): Promise<boolean> {
+		if (this.closing) return false;
 		const agent = this.agents.get(target);
-		if (!agent?.sendMessage) return false;
+		if (!agent?.sendMessage || this.stoppedIds.has(target)) return false;
+		const previous = this.settlements.get(target);
+		const announcement = this.pendingAnnouncements.get(target);
+		// Invalidate before suspension: never erase a completion produced while
+		// the RPC acknowledgement is in flight.
+		this.clearSettlement(target);
 		const ok = await agent.sendMessage(text);
-		if (ok) {
-			this.clearSettlement(target);
-			this.touchSupervision(target);
+		if (this.closing || this.stoppedIds.has(target)) return false;
+		if (this.agents.get(target) !== agent) return ok;
+		if (!ok) {
+			if (previous && !this.settlements.has(target) && agent.status !== "running") {
+				this.settlements.set(target, previous);
+				if (announcement) this.pendingAnnouncements.set(target, announcement);
+			}
+			return false;
 		}
-		// A delivered message woke an idle persistent agent — the widget row
-		// flips back to running (spinner resumes). Harmless for running rows.
-		if (ok) this.getWidget()?.setStatus?.(target, "running");
-		return ok;
+		const settled = this.settlements.get(target);
+		if (settled?.completion.generation !== undefined && settled.completion.generation !== agent.generation)
+			this.clearSettlement(target);
+		this.touchSupervision(target);
+		this.getWidget()?.setStatus?.(target, agent.status === "completed" ? "idle" : "running");
+		return true;
 	}
 
 	/** Flip a persistent agent's widget row back to idle (wake finished). */
@@ -456,6 +498,7 @@ export class AgentRegistry {
 		// and suppress its notification (stop/complete race). stop() also
 		// flags the stop itself, but only after the transport shutdown it
 		// awaits — too late to close the window.
+		this.stoppedIds.add(agentId);
 		agent.markStopped();
 		await agent.stop();
 		// An already-settled resident agent (completed/idle) is untouched by
@@ -476,16 +519,27 @@ export class AgentRegistry {
 	}
 
 	/** Stop everything (session shutdown). */
-	async shutdown(): Promise<void> {
-		for (const agentId of this.agents.keys()) this.stopSupervision(agentId);
+	shutdown(): Promise<void> {
+		if (this.shutdownPromise) return this.shutdownPromise;
+		this.closing = true;
+		const owned = [...this.agents.values()];
+		for (const agent of owned) {
+			this.stoppedIds.add(agent.agentId);
+			agent.markStopped();
+			this.stopSupervision(agent.agentId);
+		}
 		for (const waiters of this.settlementWaiters.values()) for (const resolve of waiters) resolve(undefined);
 		this.settlementWaiters.clear();
 		this.pendingAnnouncements.clear();
-		for (const agent of this.agents.values()) {
-			void agent.stop();
-		}
-		this.agents.clear();
-		this.getWidget()?.dispose();
+		this.settlements.clear();
+		this.shutdownPromise = (async () => {
+			const results = await Promise.allSettled(owned.map((agent) => agent.stop()));
+			this.agents.clear();
+			this.getWidget()?.dispose();
+			const errors = results.filter((r): r is PromiseRejectedResult => r.status === "rejected").map((r) => r.reason);
+			if (errors.length) throw new AggregateError(errors, "Subagent session cleanup failed.");
+		})();
+		return this.shutdownPromise;
 	}
 
 	private remove(agentId: string, result?: WidgetResult): void {

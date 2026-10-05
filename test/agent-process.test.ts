@@ -917,3 +917,82 @@ describe("AgentProcess — event timestamps", () => {
 		}
 	});
 });
+
+describe("resumed process event ordering", () => {
+	it("preserves a completion delivered before the wake acknowledgement", async () => {
+		const idle: number[] = [];
+		const { agent, fake } = makeAgent({
+			cwd: "/tmp",
+			persistent: true,
+			onIdle: (_status, generation) => idle.push(generation),
+		});
+		await agent.spawnAndSend("initial");
+		fake.emitSettled();
+		await agent.waitForCompletion();
+		const original = fake.sendCommand.bind(fake);
+		let acknowledge!: () => void;
+		fake.sendCommand = async (command, timeout) => {
+			if (command.type === "prompt")
+				await new Promise<void>((resolve) => {
+					acknowledge = resolve;
+				});
+			return original(command, timeout);
+		};
+		const sending = agent.sendMessage("next");
+		await Promise.resolve();
+		fake.emitSettled();
+		acknowledge();
+		assert.equal(await sending, true);
+		assert.equal(agent.status, "completed");
+		assert.deepEqual(idle, [2]);
+	});
+	it("does not clear a new question that arrived before acknowledgement", async () => {
+		const { agent, fake } = makeAgent({ cwd: "/tmp", persistent: true });
+		await agent.spawnAndSend("initial");
+		fake.emitSettled();
+		await agent.waitForCompletion();
+		const original = fake.sendCommand.bind(fake);
+		let acknowledge!: () => void;
+		fake.sendCommand = async (command, timeout) => {
+			if (command.type === "prompt")
+				await new Promise<void>((resolve) => {
+					acknowledge = resolve;
+				});
+			return original(command, timeout);
+		};
+		agent.awaitingParent = true;
+		agent.pendingQuestion = { from: "a1", question: "first" };
+		const sending = agent.sendMessage("answer");
+		await Promise.resolve();
+		fake.emitEvent({
+			type: "extension_ui_request",
+			method: "setStatus",
+			statusKey: "pi-subagent-question",
+			statusText: JSON.stringify({ from: "a1", question: "second" }),
+		});
+		acknowledge();
+		assert.equal(await sending, true);
+		assert.equal(agent.pendingQuestion?.question, "second");
+		assert.equal(agent.awaitingParent, true);
+	});
+	it("a resumed running process stop waits for EOF exit", async () => {
+		const { agent, fake } = makeAgent({ cwd: "/tmp", persistent: true });
+		await agent.spawnAndSend("initial");
+		fake.emitSettled();
+		await agent.waitForCompletion();
+		await agent.sendMessage("next");
+		fake.endInput = () => {
+			fake.endInputCalls++;
+		};
+		let finished = false;
+		const stopping = agent.stop().then(() => {
+			finished = true;
+		});
+		await Promise.resolve();
+		assert.equal(finished, false);
+		assert.equal(agent.status, "stopped");
+		fake.emitExit(0);
+		await stopping;
+		assert.equal(fake.endInputCalls, 1);
+	});
+});

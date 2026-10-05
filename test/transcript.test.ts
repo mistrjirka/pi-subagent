@@ -55,7 +55,7 @@ describe("transcript formatting", () => {
 		assert.match(text, /npm run typecheck/);
 	});
 
-	it("raw thinking never reduces the selected tool/message rows under the same limits", () => {
+	it("expanded reasoning obeys the final budget while retaining recent tool evidence", () => {
 		const base = [
 			{ role: "user", content: "task" },
 			{
@@ -76,8 +76,9 @@ describe("transcript formatting", () => {
 		const markerOnly = formatTranscript(base, options);
 		const detailed = formatTranscript(withThinking, options);
 		const toolEvidence = (text: string) => (text.match(/\[tool call\]|tool result/g) ?? []).length;
-		assert.equal(toolEvidence(detailed), toolEvidence(markerOnly));
-		assert.match(detailed, /x{100}/);
+		assert.ok(detailed.length <= 256);
+		assert.ok(toolEvidence(detailed) > 0);
+		assert.ok(markerOnly.length <= 256);
 		assert.match(detailed, /tool result \(grep\): grep ok/);
 	});
 
@@ -98,8 +99,7 @@ describe("transcript formatting", () => {
 		const detailed = formatRecentActivity(detailedEvents, 20, 200);
 		const tools = (text: string) => (text.match(/\[tool call\]/g) ?? []).length;
 		assert.equal(tools(detailed), tools(markerOnly));
-		assert.match(detailed, /a{100}/);
-		assert.match(detailed, /b{100}/);
+		assert.ok(detailed.length <= 200);
 		assert.match(detailed, /npm test/);
 	});
 
@@ -125,7 +125,7 @@ describe("monitoring transcript fallbacks", () => {
 		assert.match(snapshot.text, /live task/);
 	});
 
-	it("falls back to the persisted session when get_messages fails", async () => {
+	it("prefers persisted evidence without requesting the full RPC history", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "pi-subagent-transcript-"));
 		const sessionPath = join(dir, "child.jsonl");
 		try {
@@ -152,7 +152,7 @@ describe("monitoring transcript fallbacks", () => {
 				sessionPath,
 			});
 			assert.equal(snapshot.source, "session");
-			assert.match(snapshot.text, /get_messages unavailable/);
+			assert.doesNotMatch(snapshot.text, /get_messages unavailable/);
 			assert.match(snapshot.text, /persisted task/);
 			assert.match(snapshot.text, /build ok/);
 		} finally {

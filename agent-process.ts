@@ -32,6 +32,8 @@ interface AgentStats {
 }
 
 export interface AgentCompletion {
+	/** Revision of the work that produced this snapshot. */
+	generation?: number;
 	status: TerminalStatus;
 	output: string;
 	stats: AgentStats;
@@ -74,7 +76,7 @@ export interface AgentProcessOptions {
 	/** Tree telemetry from this child's own spawns (extension_ui_request, tree key) — forward or apply. */
 	onTreeEvent?: (event: AgentTreeEvent) => void;
 	/** A woken persistent agent settled: "completed" → idle, "failed" → report + clean up. */
-	onIdle?: (outcome: "completed" | "failed") => void;
+	onIdle?: (outcome: "completed" | "failed", generation: number) => void;
 	/** Resident after completion (idle, zero token) — explicit opt-in, default off. */
 	persistent?: boolean;
 	/** Extra child environment (identity injection: PI_SUBAGENT_AGENT_ID / PI_SUBAGENT_PARENT). */
@@ -123,7 +125,12 @@ export class AgentProcess {
 	private settleCount = 0;
 	/** settleCount observed at the last awaitSettled() call. */
 	private lastSettledCount = 0;
-	private done = false;
+	/** Process lifetime is independent of completed work revisions. */
+	generation = 1;
+	private closing = false;
+	private stopPromise: Promise<void> | undefined;
+	private messageQueue: Promise<void> = Promise.resolve();
+	private lastSettlement: { status: TerminalStatus; generation: number } | undefined;
 	/** Model API error captured from agent_end (stopReason "error"). */
 	private agentError: string | null = null;
 	/** Latest activity excerpt for the widget. */
@@ -163,8 +170,10 @@ export class AgentProcess {
 			onEvent: (event) => this.onEvent(event),
 			onExit: () => {
 				// Process died (any reason): release everyone waiting on settle.
+				if (this.status === "running" || this.status === "queued")
+					this.status = this.stoppedByControl ? "stopped" : "failed";
+				this.lastSettlement = { status: this.status as TerminalStatus, generation: this.generation };
 				this.settle();
-				this.done = true;
 			},
 		};
 		this.client = deps.createClient ? deps.createClient(clientOptions) : new RpcClient(clientOptions);
@@ -195,7 +204,8 @@ export class AgentProcess {
 			this.sessionId = data.sessionId;
 		}
 
-		this.status = "running";
+		if (this.closing) return { ok: false, error: "Child stopped during startup." };
+		if (this.status === "queued") this.status = "running";
 		return { ok: true };
 	}
 
@@ -211,29 +221,49 @@ export class AgentProcess {
 	 * the prompt preflight accepted the message. Waking an idle persistent
 	 * agent flips it back to running.
 	 */
-	async sendMessage(text: string): Promise<boolean> {
-		// A successful message to an ask_parent waiter is the parent's answer.
-		// Do not clear the waiting state before RPC acceptance: a failed delivery
-		// must leave the question answerable.
+	sendMessage(text: string): Promise<boolean> {
+		const result = this.messageQueue.then(() => this.deliverMessage(text));
+		this.messageQueue = result.then(
+			() => undefined,
+			() => undefined,
+		);
+		return result;
+	}
+
+	private async deliverMessage(text: string): Promise<boolean> {
+		if (this.closing || this.client.isClosed || this.status === "stopped" || this.status === "failed") return false;
+		const previousStatus = this.status;
+		const previousQuestion = this.pendingQuestion;
 		const wasAwaitingParent = this.awaitingParent;
-		const deliveredText = wasAwaitingParent
-			? `[parent answer to your pending ask_parent]\n${text}`
-			: text;
-		const response = await this.client
-			.sendCommand({ type: "prompt", message: deliveredText, streamingBehavior: "steer" })
-			.catch((err: Error) => ({
-				type: "response" as const,
-				command: "prompt" as const,
-				success: false as const,
-				error: err.message,
-			}));
-		if (!response.success) return false;
-		if (wasAwaitingParent) {
+		const waking = previousStatus === "completed" || wasAwaitingParent;
+		this.generation++;
+		if (waking) {
+			this.agentError = null;
+			this.status = "running";
 			this.awaitingParent = false;
 			this.pendingQuestion = undefined;
+			this.lastSettledCount = this.settleCount;
 		}
-		// Woke an idle persistent/waiting agent — activity resumes.
-		if (this.status === "completed") this.status = "running";
+		const generation = this.generation;
+		const deliveredText = wasAwaitingParent ? `[parent answer to your pending ask_parent]\n${text}` : text;
+		const response = await this.client
+			.sendCommand({ type: "prompt", message: deliveredText, streamingBehavior: "steer" })
+			.catch((err: Error) => ({ success: false, error: err.message }));
+		if (this.closing || this.stoppedByControl) return false;
+		if (!response.success) {
+			if (waking && this.generation === generation && this.status === "running" && !this.pendingQuestion) {
+				this.status = previousStatus;
+				this.awaitingParent = wasAwaitingParent;
+				this.pendingQuestion = previousQuestion;
+				this.lastSettlement = { status: "completed", generation };
+				// Recollect the unchanged idle turn under this revision: old in-flight
+				// collectors were invalidated before the attempted wake.
+				this.onIdle?.("completed", generation);
+			}
+			return false;
+		}
+		// A settle/new question can arrive before this acknowledgement. Do not
+		// overwrite either state using the pre-await snapshot.
 		return true;
 	}
 
@@ -296,33 +326,26 @@ export class AgentProcess {
 	 * task deadline, turn cap, token cap, or tool-call cap in this runtime.
 	 */
 	async waitForCompletion(): Promise<AgentCompletion> {
-		if (this.status === "running" && !this.done) await this.awaitSettled();
+		if ((this.status === "running" || this.status === "queued") && !this.client.isClosed) await this.awaitSettled();
+		const settled = this.lastSettlement ?? {
+			status: (this.status === "stopped"
+				? "stopped"
+				: this.agentError || this.client.exitCode
+					? "failed"
+					: "completed") as TerminalStatus,
+			generation: this.generation,
+		};
+		return this.completionForTurn(settled.status, settled.generation);
+	}
 
-		this.done = true;
-		if (this.status === "stopped") {
-			// Already stopped externally (agent_stop/user abort) — keep it.
-		} else if (this.agentError) {
-			this.status = "failed";
-		} else if (this.client.exitCode !== null && this.client.exitCode !== 0) {
-			this.status = "failed";
-		} else {
-			this.status = "completed";
-		}
-
-		// A failed child usually leaves empty terminal text; the real root cause
-		// lives in the model error (agentError) or the stderr the RpcClient
-		// captured before exit — surface it instead of a blank "Sub-agent failed."
-		const output = await this.lastOutput();
-		const finalOutput =
-			this.agentError && !output.trim()
-				? this.agentError
-				: this.status === "failed" && !output.trim()
-					? this.client.stderrText
-					: output;
-		const stats = await this.getStats();
+	/** Collect a revision-tagged snapshot; callers reject it if work resumed. */
+	async completionForTurn(status: TerminalStatus, generation = this.generation): Promise<AgentCompletion> {
+		const error = this.agentError;
+		const [output, stats] = await Promise.all([this.lastOutput(), this.getStats()]);
 		return {
-			status: this.status,
-			output: finalOutput,
+			generation,
+			status,
+			output: output.trim() ? output : error || (status === "failed" ? this.client.stderrText : output),
 			stats: {
 				tokens: stats?.tokens ?? 0,
 				toolUses: stats?.toolUses ?? 0,
@@ -338,41 +361,56 @@ export class AgentProcess {
 	 * exit within STOP_GRACE_MS, SIGTERM as a fallback. Flags the stop as
 	 * user-controlled (agent_stop / cancel) — suppresses notifications.
 	 */
-	async stop(): Promise<void> {
-		if (this.done) {
-			// Already terminal — just ensure the child is gone.
-			this.client.endInput();
-			return;
+	stop(): Promise<void> {
+		if (this.stopPromise) return this.stopPromise;
+		this.closing = true;
+		if (this.status === "running" || this.status === "queued") {
+			this.markStopped();
+			this.lastSettlement = { status: "stopped", generation: this.generation };
+			this.settle();
 		}
-		this.stoppedByControl = true;
-		await this.hardStop();
+		this.stopPromise = this.closeProcess();
+		return this.stopPromise;
 	}
 
-	/**
-	 * Record an explicit user stop as the reported terminal state.
-	 *
-	 * stop() early-returns for an already-settled agent (a persistent agent
-	 * sitting at completed/idle), so the normal completion path keeps
-	 * reporting completed/failed. stopAndRemove() calls this before awaiting
-	 * stop() so the external-control bridge's terminal check observes
-	 * "stopped" and winds down instead of heartbeating idle forever.
-	 * Idempotent, and never overwrites an already-terminal failed — failed
-	 * is terminal on its own and the bridge already stops polling for it.
-	 */
+	/** Record an explicit stop before asynchronous transport teardown. This
+	 * invalidates older completion snapshots and releases parent-question state.
+	 * A failed child retains its failure status. */
 	markStopped(): void {
 		this.stoppedByControl = true;
+		this.generation++;
+		this.awaitingParent = false;
+		this.pendingQuestion = undefined;
 		if (this.status === "stopped" || this.status === "failed") return;
 		this.status = "stopped";
 	}
 
 	/** stdin EOF + SIGTERM fallback; waits for the child to exit. */
-	private async hardStop(): Promise<void> {
-		this.status = "stopped";
-		this.done = true;
+	private async closeProcess(): Promise<void> {
 		this.client.endInput();
-		this.settle();
-		await Promise.race([this.client.waitForExit(), new Promise((resolve) => setTimeout(resolve, STOP_GRACE_MS))]);
-		if (!this.client.isClosed) this.client.kill("SIGTERM");
+		if (this.client.isClosed) return;
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		try {
+			await Promise.race([
+				this.client.waitForExit(),
+				new Promise<void>((resolve) => {
+					timer = setTimeout(resolve, STOP_GRACE_MS);
+				}),
+			]);
+		} finally {
+			if (timer) clearTimeout(timer);
+		}
+		if (!this.client.isClosed) {
+			this.client.kill("SIGTERM");
+			await Promise.race([
+				this.client.waitForExit(),
+				new Promise<void>((resolve) => {
+					timer = setTimeout(resolve, STOP_GRACE_MS);
+				}),
+			]);
+			if (timer) clearTimeout(timer);
+			if (!this.client.isClosed) this.client.kill("SIGKILL");
+		}
 	}
 
 	/** Latest activity excerpt for the widget (undefined until the first message_update). */
@@ -397,7 +435,7 @@ export class AgentProcess {
 	private readonly onMessage: ((message: AgentMessage) => void) | undefined;
 	private readonly onQuestion: ((question: AgentQuestion) => void) | undefined;
 	private readonly onTreeEvent: ((event: AgentTreeEvent) => void) | undefined;
-	private readonly onIdle: ((outcome: "completed" | "failed") => void) | undefined;
+	private readonly onIdle: ((outcome: "completed" | "failed", generation: number) => void) | undefined;
 	private readonly onStream: ((event: AgentEvent) => void) | undefined;
 
 	private onEvent(event: RpcEvent): void {
@@ -409,16 +447,20 @@ export class AgentProcess {
 		// message delivery.
 		for (const ev of interpretEvent(event)) {
 			switch (ev.type) {
-				case "settled":
+				case "settled": {
+					const followUp = this.settleCount > 0;
+					const outcome = this.agentError ? "failed" : "completed";
+					if (!this.stoppedByControl && !this.closing) this.status = outcome;
+					this.lastSettlement = {
+						status: this.stoppedByControl ? "stopped" : outcome,
+						generation: this.generation,
+					};
 					this.settle();
-					// Persistent agent woke by sendMessage finished its follow-up
-					// turn — completed goes back to idle; a model error is reported
-					// honestly (never disguised as idle).
-					if (this.done && (this.persistent || this.questionResident) && this.status === "running") {
-						this.status = this.agentError ? "failed" : "completed";
-						this.onIdle?.(this.agentError ? "failed" : "completed");
+					if (followUp && (this.persistent || this.questionResident) && !this.stoppedByControl && !this.closing) {
+						this.onIdle?.(outcome, this.generation);
 					}
 					break;
+				}
 				case "assistant_start":
 				case "assistant_end":
 					// Stream-only message boundaries. They give external transcript
@@ -446,6 +488,8 @@ export class AgentProcess {
 					this.onStream?.(ev);
 					break;
 				}
+				case "tool_execution_start":
+				case "tool_execution_end":
 				case "tool_start":
 					// Stream-only: the fold waits for toolcall_end (authoritative args).
 					this.onStream?.(ev);
@@ -507,7 +551,7 @@ export class AgentProcess {
 
 	/** Wait for the next settle with no framework deadline. */
 	private awaitSettled(): Promise<void> {
-		if (this.done) return Promise.resolve();
+		if (this.closing || this.client.isClosed) return Promise.resolve();
 		if (this.settleCount > this.lastSettledCount) {
 			this.lastSettledCount = this.settleCount;
 			return Promise.resolve();

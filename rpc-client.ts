@@ -18,8 +18,8 @@
  */
 
 import { type ChildProcess, spawn } from "node:child_process";
-import { StringDecoder } from "node:string_decoder";
 import { parseLine, type RpcCommand, type RpcEvent, type RpcResponse, serializeCommand } from "./protocol.js";
+import { JsonlFramer } from "./rpc-framing.js";
 
 export interface RpcClientOptions {
 	/** pi argv after `--mode rpc` (e.g. --model, --tools, --name). */
@@ -40,7 +40,7 @@ const RESPONSE_TIMEOUT_MS = 10_000;
 /**
  * Single-line output cap: a pathological (or buggy) child spewing one huge
  * line would otherwise grow `buffer` without bound. Lines past this are
- * dropped at the line boundary; individual real lines are far smaller.
+ * dropped through the next line boundary; later valid frames are retained.
  */
 const MAX_LINE_BUFFER = 1024 * 1024;
 
@@ -57,9 +57,12 @@ export class RpcClient {
 	private readonly proc: ChildProcess;
 	private readonly options: RpcClientOptions;
 	private readonly pending = new Map<string, PendingWaiter>();
-	private readonly decoder = new StringDecoder("utf8");
+	private readonly framer = new JsonlFramer(
+		(line) => this.handleLine(line),
+		(error) => this.failAll(error),
+		MAX_LINE_BUFFER,
+	);
 	private seq = 0;
-	private buffer = "";
 	private stderr = "";
 	private closed = false;
 	private exitPromise: Promise<{ code: number | null; signal: string | null }>;
@@ -163,7 +166,7 @@ export class RpcClient {
 
 	/** Hard fallback: signal the whole child process group (detached). */
 	kill(signal: NodeJS.Signals = "SIGTERM"): void {
-		if (this.closed || this.proc.exitCode !== null) return;
+		if (this.closed) return;
 		const pid = this.proc.pid;
 		if (pid === undefined) return;
 		if (process.platform !== "win32") {
@@ -175,6 +178,7 @@ export class RpcClient {
 				/* group gone — fall through to the single-process signal */
 			}
 		}
+		if (this.proc.exitCode !== null || this.proc.signalCode !== null) return;
 		try {
 			this.proc.kill(signal);
 		} catch {
@@ -185,19 +189,7 @@ export class RpcClient {
 	// ── stdout line framing (strict LF, mirrors pi's jsonl.js) ──
 
 	private onData(chunk: Buffer): void {
-		this.buffer += this.decoder.write(chunk);
-		if (this.buffer.length > MAX_LINE_BUFFER) {
-			// A single unterminated line exceeded the cap — drop it rather than
-			// grow without bound (the framing is still recovered at the next \n).
-			this.buffer = "";
-		}
-		for (;;) {
-			const idx = this.buffer.indexOf("\n");
-			if (idx === -1) break;
-			const line = this.buffer.slice(0, idx);
-			this.buffer = this.buffer.slice(idx + 1);
-			this.handleLine(line);
-		}
+		this.framer.write(chunk);
 	}
 
 	private handleLine(line: string): void {

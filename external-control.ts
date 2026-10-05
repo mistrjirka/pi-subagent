@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { reportedAgentState } from "./agent-state.js";
 import type { AgentEvent } from "./event-interpret.js";
 
 export type ExternalAgentState = "queued" | "running" | "waiting" | "idle" | "completed" | "failed" | "stopped";
@@ -47,6 +48,8 @@ export interface ExternalControlStatus {
 	model?: string;
 	thinking?: string;
 	waitingForParent?: boolean;
+	/** Actual execution, independent of model argument generation and heartbeat. */
+	activeTools?: Array<{ toolCallId: string; toolName: string; startedAt: number; timeoutSeconds?: number }>;
 }
 
 type SteerRequest = {
@@ -106,9 +109,7 @@ function readJson(filePath: string): Record<string, unknown> | undefined {
 }
 
 function stateOf(agent: ExternallyControllableAgent): ExternalAgentState {
-	if (agent.awaitingParent) return "waiting";
-	if (agent.status === "completed" && agent.persistent) return "idle";
-	return agent.status;
+	return reportedAgentState(agent);
 }
 
 /** O_NOFOLLOW where the platform defines it (0 elsewhere — open still applies). */
@@ -118,15 +119,22 @@ function openNoFollow(): number {
 
 /**
  * Map one interpreted event onto an `events.jsonl` record. Undefined = no new
- * stream content (settle/message/question/tree/failure and the start/end
- * markers that repeat cumulative content). Block identity derives from the
+ * stream content (settle/message/question/tree/failure and model argument
+ * generation). Tool lifecycle rows come only from actual execution events. Block identity derives from the
  * wire contentIndex so consecutive lines sharing (runId, blockId) accumulate
  * into one in-flight item on the reader side.
  */
-function toStreamRecord(
-	event: AgentEvent,
-):
-	| { kind: ChildStreamLine["kind"]; blockId?: string; text?: string; toolName?: string; toolCallId?: string }
+function toStreamRecord(event: AgentEvent):
+	| {
+			kind: ChildStreamLine["kind"];
+			blockId?: string;
+			text?: string;
+			toolName?: string;
+			toolCallId?: string;
+			argsPreview?: string;
+			timeoutSeconds?: number;
+			isError?: boolean;
+	  }
 	| undefined {
 	switch (event.type) {
 		case "thinking":
@@ -134,14 +142,16 @@ function toStreamRecord(
 			return { kind: "thinking", blockId: `think-${event.contentIndex ?? 0}`, text: event.text };
 		case "text_delta":
 			return { kind: "text", blockId: `text-${event.contentIndex ?? 0}`, text: event.delta };
-		case "tool_start":
-			return { kind: "tool_start", toolName: event.toolName, toolCallId: event.toolCallId };
-		case "tool_call":
+		case "tool_execution_start":
 			return {
-				kind: "tool_end",
-				toolName: event.activity.name,
-				...(event.activity.id !== undefined ? { toolCallId: event.activity.id } : {}),
+				kind: "tool_start",
+				toolName: event.toolName,
+				toolCallId: event.toolCallId,
+				argsPreview: event.argsPreview,
+				...(event.timeoutSeconds !== undefined ? { timeoutSeconds: event.timeoutSeconds } : {}),
 			};
+		case "tool_execution_end":
+			return { kind: "tool_end", toolName: event.toolName, toolCallId: event.toolCallId, isError: event.isError };
 		default:
 			return undefined;
 	}
@@ -171,6 +181,8 @@ export interface ChildStreamLine {
 	toolName?: string;
 	toolCallId?: string;
 	argsPreview?: string;
+	timeoutSeconds?: number;
+	isError?: boolean;
 }
 
 const EVENTS_CAP_BYTES = 2 * 1024 * 1024;
@@ -202,6 +214,10 @@ export class ExternalControlBridge {
 	private lastFlush = Date.now();
 	private flushTimer: NodeJS.Timeout | undefined;
 	private eventsWritable = true;
+	private readonly activeTools = new Map<
+		string,
+		{ toolCallId: string; toolName: string; startedAt: number; timeoutSeconds?: number }
+	>();
 	private readonly eventsCap: number;
 	private readonly flushInterval: number;
 	private readonly maxBuffered: number;
@@ -239,6 +255,18 @@ export class ExternalControlBridge {
 	 * write disables further event writes without affecting the agent run.
 	 */
 	appendEvents(event: AgentEvent): void {
+		if (event.type === "tool_execution_start") {
+			this.activeTools.set(event.toolCallId, {
+				toolCallId: event.toolCallId,
+				toolName: event.toolName,
+				startedAt: Date.now(),
+				...(event.timeoutSeconds !== undefined ? { timeoutSeconds: event.timeoutSeconds } : {}),
+			});
+			this.writeStatus();
+		} else if (event.type === "tool_execution_end") {
+			this.activeTools.delete(event.toolCallId);
+			this.writeStatus();
+		}
 		if (!this.eventsWritable) return;
 		if (event.type === "assistant_start") {
 			// A contentIndex such as think-0/text-1 is only unique inside one
@@ -273,6 +301,9 @@ export class ExternalControlBridge {
 			...(record.text !== undefined ? { text: record.text } : {}),
 			...(record.toolName !== undefined ? { toolName: record.toolName } : {}),
 			...(record.toolCallId !== undefined ? { toolCallId: record.toolCallId } : {}),
+			...(record.argsPreview !== undefined ? { argsPreview: record.argsPreview } : {}),
+			...(record.timeoutSeconds !== undefined ? { timeoutSeconds: record.timeoutSeconds } : {}),
+			...(record.isError !== undefined ? { isError: record.isError } : {}),
 		};
 		const serialized = `${JSON.stringify(line)}\n`;
 		const bytes = Buffer.byteLength(serialized, "utf8");
@@ -407,6 +438,9 @@ export class ExternalControlBridge {
 			...(this.agent.model ? { model: this.agent.model } : {}),
 			...(this.agent.thinking ? { thinking: this.agent.thinking } : {}),
 			...(this.agent.awaitingParent ? { waitingForParent: true } : {}),
+			...(this.agent.status === "running" && this.activeTools.size
+				? { activeTools: [...this.activeTools.values()] }
+				: {}),
 		};
 	}
 

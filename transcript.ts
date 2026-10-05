@@ -1,4 +1,5 @@
 import { closeSync, fstatSync, openSync, readSync } from "node:fs";
+import { SessionEntryCursor } from "./session-transcript.js";
 import { formatStamp } from "./time.js";
 import type { RenderEvent } from "./types.js";
 
@@ -7,8 +8,8 @@ import type { RenderEvent } from "./types.js";
  *
  * Pi RPC `get_messages` returns the child's real session messages. Monitoring
  * preserves plaintext thinking when Pi provides it, alongside user/assistant
- * text, tool calls and tool results. Thinking expansion is additive: it does
- * not consume the message/tool selection budget used by supervision views.
+ * text, tool calls and tool results. Parent-facing output, including thinking and omission markers, is bounded
+ * by the final character budget. Full UI/session traces remain available.
  */
 
 export interface TranscriptFormatOptions {
@@ -94,26 +95,35 @@ function contentProjection(content: unknown, includeToolCalls: boolean): TextPro
 	};
 }
 
-function expandThinking(projection: TextProjection, start = 0, end = projection.compact.length): string {
+function expandThinking(
+	projection: TextProjection,
+	start = 0,
+	end = projection.compact.length,
+	maxChars = DEFAULT_PER_MESSAGE_CHARS,
+): string {
+	let extra = Math.max(0, maxChars - (end - start));
 	let cursor = start;
 	let result = "";
 	for (const span of projection.thinking) {
 		if (span.end <= start || span.start >= end) continue;
 		if (span.start < start || span.end > end) continue;
 		result += projection.compact.slice(cursor, span.start);
-		result += `[thinking]\n${span.text}`;
+		const thought = extra > 1 ? truncate(span.text, extra - 1) : "";
+		result += `[thinking]${thought ? `\n${thought}` : ""}`;
+		extra -= thought.length + (thought ? 1 : 0);
 		cursor = span.end;
 	}
 	result += projection.compact.slice(cursor, end);
-	return result;
+	return truncate(result, maxChars);
 }
 
 function truncateProjection(projection: TextProjection, max: number): { compact: string; detailed: string } {
-	if (projection.compact.length <= max) return { compact: projection.compact, detailed: expandThinking(projection) };
+	if (projection.compact.length <= max)
+		return { compact: projection.compact, detailed: expandThinking(projection, 0, projection.compact.length, max) };
 	const end = Math.max(0, max - 1);
 	return {
 		compact: `${projection.compact.slice(0, end)}…`,
-		detailed: `${expandThinking(projection, 0, end)}…`,
+		detailed: `${expandThinking(projection, 0, end, max - 1)}…`,
 	};
 }
 
@@ -215,20 +225,21 @@ export function formatTranscript(
 	if (!rendered.length) return "[no transcript messages yet]";
 
 	const kept: TranscriptLineProjection[] = [];
-	let used = 0;
+	let used = "[… earlier transcript omitted …]\n\n".length;
 	for (let i = rendered.length - 1; i >= 0; i--) {
 		const line = rendered[i];
-		// Budget against the compact marker form, exactly as before raw thinking
-		// became visible. Thinking expansion therefore cannot evict tool rows or
-		// change which transcript messages survive the supervision window.
-		const cost = line.compact.length + (kept.length ? 2 : 0);
+		// Charge the text actually returned, including bounded thinking.
+		const cost = line.detailed.length + (kept.length ? 2 : 0);
 		if (kept.length && used + cost > maxChars) break;
 		kept.push(line);
 		used += cost;
 	}
 	kept.reverse();
 	const omitted = selected.length < messages.length || kept.length < rendered.length;
-	return `${omitted ? "[… earlier transcript omitted …]\n\n" : ""}${kept.map((line) => line.detailed).join("\n\n")}`;
+	return truncate(
+		`${omitted ? "[… earlier transcript omitted …]\n\n" : ""}${kept.map((line) => line.detailed).join("\n\n")}`,
+		maxChars,
+	);
 }
 
 export interface TranscriptReadableAgent {
@@ -250,6 +261,8 @@ export interface IncrementalMonitoringTranscript extends MonitoringTranscript {
 	returnedMessages: number;
 	/** Number of already-fetched unread messages left behind the page boundary. */
 	remainingMessages: number;
+	/** False when a bounded local read knows only a lower bound. */
+	remainingMessagesExact?: boolean;
 	hasMore: boolean;
 	/** Stable session entry id through which this read may advance. */
 	nextCursor?: string;
@@ -312,7 +325,7 @@ function renderUnreadEntryPage(
 	let used = 0;
 	for (const item of rendered) {
 		if (kept.length >= maxMessages) break;
-		const cost = item.line.compact.length + (kept.length ? 2 : 0);
+		const cost = item.line.detailed.length + (kept.length ? 2 : 0);
 		if (kept.length && used + cost > maxChars) break;
 		kept.push(item);
 		used += cost;
@@ -326,7 +339,7 @@ function renderUnreadEntryPage(
 			? `\n\n[… ${remainingMessages} unread transcript message${remainingMessages === 1 ? "" : "s"} remain …]`
 			: "";
 	return {
-		text: kept.map((item) => item.line.detailed).join("\n\n") + suffix,
+		text: truncate(kept.map((item) => item.line.detailed).join("\n\n") + suffix, maxChars),
 		returnedMessages: kept.length,
 		remainingMessages,
 		hasMore: remainingMessages > 0,
@@ -338,7 +351,36 @@ async function getIncrementalMonitoringTranscript(
 	agent: TranscriptReadableAgent,
 	since: string | undefined,
 	options: TranscriptFormatOptions,
+	sessionCursor: SessionEntryCursor,
 ): Promise<IncrementalMonitoringTranscript> {
+	if (agent.sessionPath) {
+		try {
+			const page = sessionCursor.read(agent.sessionPath, Math.max(1, options.maxMessages ?? DEFAULT_MAX_MESSAGES) + 1);
+			const formatted = renderUnreadEntryPage(page.entries, options);
+			sessionCursor.commit(formatted.nextCursor);
+			return {
+				...formatted,
+				source: "session",
+				hasMore: formatted.hasMore || page.hasMore,
+				remainingMessages: Math.max(formatted.remainingMessages, page.hasMore ? 1 : 0),
+				remainingMessagesExact: !page.hasMore,
+			};
+		} catch (error) {
+			// An inaccessible file can use RPC; malformed/oversized persisted data
+			// must remain an explicit error instead of another oversized fetch.
+			if (!(error instanceof Error && "code" in error && ["ENOENT", "EACCES"].includes(String(error.code)))) {
+				const rpcError = error instanceof Error ? error.message : String(error);
+				return {
+					text: `[incremental transcript unavailable: ${rpcError}]`,
+					source: "none",
+					rpcError,
+					returnedMessages: 0,
+					remainingMessages: 0,
+					hasMore: false,
+				};
+			}
+		}
+	}
 	if (!agent.getEntries) {
 		const rpcError = "child runtime does not expose get_entries";
 		return {
@@ -373,13 +415,14 @@ async function getIncrementalMonitoringTranscript(
 export class IncrementalTranscriptCursor {
 	private afterEntryId: string | undefined;
 	private queue: Promise<void> = Promise.resolve();
+	private readonly sessionCursor = new SessionEntryCursor();
 
 	read(
 		agent: TranscriptReadableAgent,
 		options: TranscriptFormatOptions = {},
 	): Promise<IncrementalMonitoringTranscript> {
 		const result = this.queue.then(async () => {
-			const snapshot = await getIncrementalMonitoringTranscript(agent, this.afterEntryId, options);
+			const snapshot = await getIncrementalMonitoringTranscript(agent, this.afterEntryId, options, this.sessionCursor);
 			if (snapshot.nextCursor) this.afterEntryId = snapshot.nextCursor;
 			return snapshot;
 		});
@@ -469,15 +512,22 @@ export function formatRecentActivity(
 		}
 	}
 	const combined: TextProjection = { compact, thinking };
-	if (compact.length <= maxChars) return expandThinking(combined);
+	if (compact.length <= maxChars) return expandThinking(combined, 0, compact.length, maxChars);
 	const start = compact.length - maxChars;
-	return `[… earlier live events omitted …]\n\n${expandThinking(combined, start)}`;
+	return truncate(
+		`[… earlier live events omitted …]\n\n${expandThinking(combined, start, compact.length, maxChars)}`,
+		maxChars,
+	);
 }
 
 export async function getMonitoringTranscript(
 	agent: TranscriptReadableAgent,
 	options: TranscriptFormatOptions = {},
 ): Promise<MonitoringTranscript> {
+	if (agent.sessionPath) {
+		const persisted = recentSessionMessages(agent.sessionPath);
+		if (persisted.length) return { text: formatTranscript(persisted, options), source: "session" };
+	}
 	let rpcError: string | undefined;
 	if (agent.getMessages) {
 		try {
@@ -495,7 +545,7 @@ export async function getMonitoringTranscript(
 				? `[live get_messages unavailable: ${rpcError}; showing persisted session fallback]\n\n`
 				: "[showing persisted session fallback]\n\n";
 			return {
-				text: prefix + formatTranscript(persisted, options),
+				text: truncate(prefix + formatTranscript(persisted, options), options.maxChars ?? DEFAULT_MAX_CHARS),
 				source: "session",
 				...(rpcError ? { rpcError } : {}),
 			};
@@ -507,7 +557,14 @@ export async function getMonitoringTranscript(
 		const prefix = rpcError
 			? `[live get_messages unavailable: ${rpcError}; showing live event fallback]\n\n`
 			: "[live Pi message transcript is empty; showing live event fallback]\n\n";
-		return { text: prefix + formatRecentActivity(events), source: "events", ...(rpcError ? { rpcError } : {}) };
+		return {
+			text: truncate(
+				prefix + formatRecentActivity(events, options.maxMessages, options.maxChars),
+				options.maxChars ?? DEFAULT_MAX_CHARS,
+			),
+			source: "events",
+			...(rpcError ? { rpcError } : {}),
+		};
 	}
 
 	return {

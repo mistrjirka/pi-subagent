@@ -1,10 +1,19 @@
 # Changelog
 
-## Unreleased
+## 0.5.8 — bounded supervision and lifecycle race fixes
 
 - Preserve a resumed `ask_parent` child's final answer when it finishes. The wake-completion path now records the real completion through the normal registry policy before tearing down a non-persistent child, instead of racing `stopAndRemove()` and returning a synthetic `Agent stopped.` to an active `agent_wait`.
 - Apply the same ordering to failed resumed turns so the parent receives the real failure rather than having it replaced by an explicit-stop settlement.
 - Make root-level spawns asynchronous by default: omitted or `true` `run_in_background` detaches, while explicit `false` keeps the child foreground. Nested delegation remains foreground-only.
+- Page the persisted child session before requesting RPC history, avoiding oversized `get_entries` responses. Commit the shared wait/inspect cursor only after formatting; retain incomplete appends for a later read. Bounded scans report a lower bound for unread counts.
+- Enforce the final transcript character limit, including reasoning and omission markers. Preserve selected tool evidence while using only spare space for reasoning expansion.
+- Recover JSONL framing after an oversized response without losing later valid frames; fail pending requests immediately rather than timing out.
+- Tag completion collection with a work revision. Reject late snapshots after a wake, steering message, explicit stop, or session teardown. Serialize message delivery and preserve questions/settlements arriving before the prompt acknowledgement.
+- Await child shutdown on every hosting-session teardown. Keep archived completion results inspectable, surface wait/inspect failures as errors, and distinguish queued messages from accepted idle-child prompts.
+- Emit live tool start/end from actual execution events, not model tool-argument generation. Publish active tool identity/start time and an explicit bash timeout for external UIs; a long command remains running until its real execution-end event.
+- Support Pi 0.87.1 alongside the existing 0.84 line.
+
+Validation: Biome and TypeScript checks pass; all 320 tests pass on both Pi 0.84.4 and 0.87.1, including long-command execution telemetry, oversized history/framing, and deterministic lifecycle races.
 
 ## 0.5.7 — fix child-to-parent message delivery at the root
 

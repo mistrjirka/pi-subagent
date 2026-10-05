@@ -752,3 +752,64 @@ describe("AgentRegistry — ancestor id seeding (cross-process collisions)", () 
 		}
 	});
 });
+
+describe("revision and shutdown ordering regressions", () => {
+	it("rejects a previous revision collected after a wake", async () => {
+		const { registry, widget } = makeRegistry();
+		const agent = Object.assign(new FakeAgent("a1", "resident", true), { generation: 2 });
+		registry.register(agent);
+		assert.equal(await registry.complete(agent, completion({ generation: 1 })), false);
+		assert.equal(registry.peekSettlement("a1"), undefined);
+		assert.deepEqual(widget?.statuses, []);
+	});
+	it("does not let a late completion replace an explicit stopped settlement", async () => {
+		const { registry } = makeRegistry();
+		const agent = new FakeAgent("a1", "resident", true);
+		registry.register(agent);
+		await registry.stopAndRemove("a1");
+		assert.equal(await registry.complete(agent, completion()), false);
+		assert.equal((await registry.waitForSettlement("a1"))?.completion.status, "stopped");
+	});
+	it("keeps the new completion recorded while prompt acceptance is pending", async () => {
+		const { registry, widget } = makeRegistry();
+		const agent = Object.assign(new FakeAgent("a1", "resident", true), { generation: 1 });
+		let release!: (ok: boolean) => void;
+		agent.sendMessage = async () => {
+			agent.generation++;
+			return new Promise<boolean>((resolve) => {
+				release = resolve;
+			});
+		};
+		registry.register(agent);
+		registry.recordSettlement("a1", { completion: completion({ generation: 1 }) });
+		const sending = registry.deliver("a1", "continue");
+		agent.status = "completed";
+		registry.recordSettlement("a1", { completion: completion({ generation: 2, output: "new answer" }) });
+		release(true);
+		assert.equal(await sending, true);
+		assert.equal((await registry.waitForSettlement("a1"))?.completion.output, "new answer");
+		assert.equal(widget?.statuses.at(-1)?.status, "idle");
+	});
+	it("shutdown waits for child exits and rejects late settlements", async () => {
+		const { registry, widget } = makeRegistry();
+		const agent = new FakeAgent("a1");
+		let release!: () => void;
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		agent.stop = () => gate;
+		registry.register(agent);
+		let finished = false;
+		const closing = registry.shutdown().then(() => {
+			finished = true;
+		});
+		await Promise.resolve();
+		assert.equal(finished, false);
+		assert.equal(await registry.complete(agent, completion()), false);
+		assert.throws(() => registry.register(new FakeAgent("a2")), /closing/);
+		release();
+		await closing;
+		assert.equal(widget?.disposed, true);
+		assert.equal(registry.peekSettlement("a1"), undefined);
+	});
+});

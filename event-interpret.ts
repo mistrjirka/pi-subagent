@@ -13,7 +13,8 @@
  * authoritative tool-call (the wire streams the name on `toolcall_start` and
  * arguments on `toolcall_delta`, but only the end event carries the complete
  * call — the earlier events are deliberately ignored), and text arrives as
- * `text_delta`.
+ * `text_delta`. Actual execution starts/ends are separate tool_execution events;
+ * finishing tool-call arguments does not mean execution has finished.
  *
  * Pure and side-effect free — unit-tested against raw event shapes as they
  * arrive off the wire. AgentProcess.onEvent is a thin switch over the result.
@@ -48,6 +49,8 @@ export type AgentEvent =
 	| { type: "thinking"; text?: string; contentIndex?: number }
 	| { type: "tool_start"; toolCallId: string; toolName: string; contentIndex?: number }
 	| { type: "tool_call"; activity: Extract<AgentActivity, { kind: "tool" }>; contentIndex?: number }
+	| { type: "tool_execution_start"; toolCallId: string; toolName: string; argsPreview: string; timeoutSeconds?: number }
+	| { type: "tool_execution_end"; toolCallId: string; toolName: string; isError: boolean }
 	| { type: "text_delta"; delta: string; contentIndex?: number }
 	| { type: "agent_failed"; error: string }
 	| { type: "agent_msg"; message: AgentMessage }
@@ -139,6 +142,31 @@ export function interpretEvent(raw: RpcEvent): AgentEvent[] {
 			return [{ type: raw.type === "message_start" ? "assistant_start" : "assistant_end" }];
 		}
 		return [];
+	}
+
+	if (raw.type === "tool_execution_start" || raw.type === "tool_execution_end") {
+		if (typeof raw.toolCallId !== "string" || typeof raw.toolName !== "string") return [];
+		if (raw.type === "tool_execution_end") {
+			return [
+				{
+					type: "tool_execution_end",
+					toolCallId: raw.toolCallId,
+					toolName: raw.toolName,
+					isError: raw.isError === true,
+				},
+			];
+		}
+		const args = raw.args && typeof raw.args === "object" ? (raw.args as Record<string, unknown>) : {};
+		const timeout = raw.toolName === "bash" ? args.timeout : undefined;
+		return [
+			{
+				type: "tool_execution_start",
+				toolCallId: raw.toolCallId,
+				toolName: raw.toolName,
+				argsPreview: summarizeArgs(raw.toolName, args).slice(0, 500),
+				...(typeof timeout === "number" && Number.isFinite(timeout) && timeout > 0 ? { timeoutSeconds: timeout } : {}),
+			},
+		];
 	}
 
 	if (raw.type === "message_update") {

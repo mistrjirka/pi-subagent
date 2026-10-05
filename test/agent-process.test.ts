@@ -35,7 +35,10 @@ class FakeClient {
 	});
 
 	/** Simulated session stats returned by get_session_stats. */
-	stats: { tokens: number; toolCalls: number } = { tokens: 100, toolCalls: 2 };
+	stats: { tokens: number; toolCalls: number; output?: number; context?: number | null } = {
+		tokens: 100,
+		toolCalls: 2,
+	};
 	/** Simulated preflight result. */
 	promptOk = true;
 	/** Simulated last assistant text. */
@@ -104,7 +107,11 @@ class FakeClient {
 					type: "response",
 					command: "get_session_stats",
 					success: true,
-					data: { tokens: { total: this.stats.tokens }, toolCalls: this.stats.toolCalls },
+					data: {
+						tokens: { total: this.stats.tokens, output: this.stats.output },
+						contextUsage: { tokens: this.stats.context },
+						toolCalls: this.stats.toolCalls,
+					},
 				};
 			case "get_last_assistant_text":
 				return {
@@ -994,5 +1001,23 @@ describe("resumed process event ordering", () => {
 		fake.emitExit(0);
 		await stopping;
 		assert.equal(fake.endInputCalls, 1);
+	});
+});
+
+describe("separate usage counters", () => {
+	it("preserves cumulative, generated and context values independently", async () => {
+		const { agent, fake } = makeAgent({ cwd: "/tmp" });
+		fake.stats = { tokens: 844771, output: 6603, context: 73739, toolCalls: 25 };
+		const c = await agent.completionForTurn("completed");
+		assert.equal(c.stats.tokens, 844771);
+		assert.equal(c.stats.outputTokens, 6603);
+		assert.equal(c.stats.contextTokens, 73739);
+	});
+	it("does not turn unknown context after compaction into zero", async () => {
+		const { agent, fake } = makeAgent({ cwd: "/tmp" });
+		fake.stats = { tokens: 100, output: 0, context: null, toolCalls: 0 };
+		const c = await agent.completionForTurn("completed");
+		assert.equal(c.stats.contextTokens, undefined);
+		assert.equal(c.stats.outputTokens, 0);
 	});
 });

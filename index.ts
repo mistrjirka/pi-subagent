@@ -24,7 +24,7 @@ import { reportedAgentState } from "./agent-state.js";
  * Every sub‑agent is a resident `pi --mode rpc` child with a persisted
  * session. Foreground agent_spawn calls block until completion; background
  * calls return an agent_id immediately and deliver a completion notification
- * (`customType: "subagent-notification"`, deliverAs "followUp") carrying the
+ * (`customType: "subagent-notification"`, deliverAs "steer") carrying the
  * final output. agent_send messages flow along tree edges (parent↔child);
  * persistent agents stay resident (idle, zero token) and can be woken by a
  * message.
@@ -528,8 +528,16 @@ export default function (pi: ExtensionAPI) {
 	// spawn background work. Track the parent's actual active/settled window at
 	// every depth so resumed-child announcements cannot race a late agent_wait.
 	pi.on("agent_start", () => registry.parentBecameActive());
-	// agent_end can be followed by automatic retry/compaction. Flush deferred
-	// child announcements only when Pi reports the parent is actually settled.
+	pi.on("turn_end", (event) => {
+		if (
+			event.message.role === "assistant" &&
+			event.message.stopReason !== "error" &&
+			event.message.stopReason !== "aborted"
+		)
+			registry.parentReachedBoundary();
+	});
+	// agent_end can be followed by automatic retry/compaction. Keep an idle fallback
+	// for results arriving after the last turn boundary.
 	pi.on("agent_settled", () => registry.parentBecameIdle());
 
 	// Inbound messages (a child addresses @parent, forwards a sibling's
@@ -695,7 +703,7 @@ export default function (pi: ExtensionAPI) {
 							display: true,
 							details: { agentId, profile: profile.name, label, ...question },
 						},
-						{ deliverAs: "followUp", triggerTurn: true },
+						{ deliverAs: "steer", triggerTurn: true },
 					);
 				};
 				const wakeCompletion = (status: "completed" | "failed", generation: number) =>
@@ -1252,9 +1260,10 @@ export default function (pi: ExtensionAPI) {
 			const agentId = rawId?.replace(/^@/, "");
 			if (!agentId) return toErrorResult("`agent_id` is required.");
 			const agent = registry.lookup(agentId);
+			const settled = registry.peekSettlement(agentId);
 			if (!agent) {
-				const settled = registry.peekSettlement(agentId);
 				if (!settled) return toErrorResult(`Unknown direct child ${atId(agentId)}.`);
+				registry.consumeSettlement(agentId, settled);
 				return {
 					content: [
 						{
@@ -1279,6 +1288,17 @@ export default function (pi: ExtensionAPI) {
 				maxChars: 20_000,
 				perMessageChars: 2_000,
 			});
+			// A paginated activity read is not an acknowledgement of the final result.
+			// Cancel only when this page actually contains the full settled output.
+			if (
+				settled &&
+				!settled.waitingForParent &&
+				!transcript.hasMore &&
+				settled.completion.output.trim() &&
+				transcript.text.includes(settled.completion.output)
+			) {
+				registry.consumeSettlement(agentId, settled);
+			}
 			const activity = agent.getLatestActivity?.();
 			const elapsedMs = agent.startedAt ? Date.now() - agent.startedAt : undefined;
 			if (!HAS_PARENT) registry.touchSupervision(agentId);

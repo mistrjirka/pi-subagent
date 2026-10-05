@@ -84,6 +84,8 @@ export interface NotificationDetails {
 	idle?: boolean;
 	usage?: {
 		tokens?: number | null;
+		outputTokens?: number | null;
+		contextTokens?: number | null;
 		toolUses?: number | null;
 		durationMs?: number | null;
 	};

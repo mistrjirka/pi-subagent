@@ -27,6 +27,8 @@ type TerminalStatus = Exclude<AgentStatus, "queued" | "running">;
 
 interface AgentStats {
 	tokens: number;
+	outputTokens?: number;
+	contextTokens?: number;
 	toolUses: number;
 	durationMs: number;
 }
@@ -303,13 +305,19 @@ export class AgentProcess {
 	}
 
 	/** Best-effort token/tool stats from get_session_stats. */
-	async getStats(): Promise<{ tokens: number; toolUses: number } | null> {
-		const data = await this.sendData<{ tokens?: { total?: number }; toolCalls?: number }>({
+	async getStats(): Promise<Omit<AgentStats, "durationMs"> | null> {
+		const data = await this.sendData<{
+			tokens?: { total?: number; output?: number };
+			contextUsage?: { tokens?: number | null };
+			toolCalls?: number;
+		}>({
 			type: "get_session_stats",
 		});
 		if (!data) return null;
 		return {
 			tokens: data.tokens?.total ?? 0,
+			...(typeof data.tokens?.output === "number" ? { outputTokens: data.tokens.output } : {}),
+			...(typeof data.contextUsage?.tokens === "number" ? { contextTokens: data.contextUsage.tokens } : {}),
 			toolUses: data.toolCalls ?? 0,
 		};
 	}
@@ -348,6 +356,8 @@ export class AgentProcess {
 			output: output.trim() ? output : error || (status === "failed" ? this.client.stderrText : output),
 			stats: {
 				tokens: stats?.tokens ?? 0,
+				...(stats?.outputTokens !== undefined ? { outputTokens: stats.outputTokens } : {}),
+				...(stats?.contextTokens !== undefined ? { contextTokens: stats.contextTokens } : {}),
 				toolUses: stats?.toolUses ?? 0,
 				durationMs: Date.now() - this.startedAt,
 			},

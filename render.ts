@@ -45,7 +45,9 @@ export function renderNotification(
 	if (d.model) metaParts.push(d.model);
 	if (d.thinking) metaParts.push(d.thinking);
 	if (d.usage?.durationMs != null) metaParts.push(`Took ${formatDuration(d.usage.durationMs)}`);
-	if (d.usage?.tokens != null) metaParts.push(`${formatTokens(d.usage.tokens)} tokens`);
+	if (d.usage?.tokens != null) metaParts.push(`${formatTokens(d.usage.tokens)} cumulative tokens (incl. cache)`);
+	if (d.usage?.outputTokens != null) metaParts.push(`${formatTokens(d.usage.outputTokens)} generated tokens`);
+	if (d.usage?.contextTokens != null) metaParts.push(`~${formatTokens(d.usage.contextTokens)} context tokens`);
 	if (d.usage?.toolUses != null) metaParts.push(`${d.usage.toolUses} tool use${d.usage.toolUses === 1 ? "" : "s"}`);
 	// Persistent agent completed: resident (idle) — muted marker in the meta.
 	if (d.idle) metaParts.push("idle");

@@ -146,3 +146,22 @@ test("safeTitle caps long titles with a trailing ellipsis", () => {
 	assert.equal(out.length, 40);
 	assert.equal(out.endsWith("…"), true);
 });
+
+test("usage labels distinguish cumulative billing from generated and context tokens", () => {
+	const card = renderNotification(
+		{
+			details: {
+				status: "completed",
+				agent_id: "una",
+				label: "Una",
+				usage: { tokens: 844771, outputTokens: 6603, contextTokens: 73739 },
+			},
+		},
+		{ expanded: true },
+		theme,
+	);
+	const text = renderText(card, 200);
+	assert.ok(text.includes("844,771 cumulative tokens (incl. cache)"));
+	assert.ok(text.includes("6,603 generated tokens"));
+	assert.ok(text.includes("~73,739 context tokens"));
+});

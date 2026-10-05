@@ -1,6 +1,6 @@
 {
 	"name": "@mistrjirka/pi-subagent",
-	"version": "0.5.8",
+	"version": "0.5.9",
 	"description": "Profile-driven uncapped subagent runtime for Pi",
 	"keywords": [
 		"pi-package"
@@ -48,6 +48,7 @@
 	},
 	"devDependencies": {
 		"@biomejs/biome": "^2.5.5",
+		"@earendil-works/pi-agent-core": "^0.87.1",
 		"@earendil-works/pi-ai": "^0.87.1",
 		"@earendil-works/pi-coding-agent": "^0.87.1",
 		"@earendil-works/pi-tui": "^0.87.1",

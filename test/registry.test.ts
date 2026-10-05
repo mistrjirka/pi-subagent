@@ -813,3 +813,97 @@ describe("revision and shutdown ordering regressions", () => {
 		assert.equal(registry.peekSettlement("a1"), undefined);
 	});
 });
+
+describe("completion delivery boundaries", () => {
+	it("delivers unread completion at the next tool boundary, once", async () => {
+		const notified: string[] = [];
+		const registry = new AgentRegistry({
+			notify: (agent) => {
+				notified.push(agent.agentId);
+			},
+			supervisionIntervalMs: 0,
+		});
+		const agent = new FakeAgent("una");
+		registry.register(agent);
+		await registry.complete(agent, completion({ output: "report" }));
+		assert.deepEqual(notified, []);
+		registry.parentReachedBoundary();
+		assert.deepEqual(notified, ["una"]);
+		registry.parentBecameIdle();
+		assert.deepEqual(notified, ["una"]);
+	});
+
+	it("inspection acknowledges the completed result before the boundary", async () => {
+		const notified: string[] = [];
+		const registry = new AgentRegistry({
+			notify: (agent) => {
+				notified.push(agent.agentId);
+			},
+			supervisionIntervalMs: 0,
+		});
+		const agent = new FakeAgent("una");
+		registry.register(agent);
+		await registry.complete(agent, completion({ output: "report" }));
+		assert.equal(registry.lookup("una"), undefined);
+		assert.equal(registry.consumeSettlement("una")?.completion.output, "report");
+		registry.parentReachedBoundary();
+		registry.parentBecameIdle();
+		assert.deepEqual(notified, []);
+		assert.equal((await registry.waitForSettlement("una"))?.completion.output, "report");
+	});
+
+	it("inspecting activity alone does not discard an unread completion", async () => {
+		let announced = 0;
+		const registry = new AgentRegistry({
+			notify: () => {
+				announced++;
+			},
+			supervisionIntervalMs: 0,
+		});
+		const agent = new FakeAgent("una", "resident", true);
+		registry.register(agent);
+		await registry.complete(agent, completion());
+		registry.peekSettlement("una");
+		registry.parentReachedBoundary();
+		assert.equal(announced, 1);
+	});
+
+	it("a resident result read is acknowledged, but a new generation still announces", async () => {
+		let announced = 0;
+		const registry = new AgentRegistry({
+			notify: () => {
+				announced++;
+			},
+			supervisionIntervalMs: 0,
+		});
+		const agent = new FakeAgent("una", "resident", true);
+		registry.register(agent);
+		await registry.complete(agent, completion());
+		registry.consumeSettlement("una");
+		registry.parentReachedBoundary();
+		assert.equal(announced, 0);
+		await registry.deliver("una", "next task");
+		await registry.complete(agent, completion({ output: "new result" }));
+		registry.parentReachedBoundary();
+		assert.equal(announced, 1);
+	});
+});
+
+it("a stale asynchronous inspection cannot acknowledge a newer settlement", async () => {
+	let announced = 0;
+	const registry = new AgentRegistry({
+		notify: () => {
+			announced++;
+		},
+		supervisionIntervalMs: 0,
+	});
+	const agent = new FakeAgent("una", "resident", true);
+	registry.register(agent);
+	await registry.complete(agent, completion({ output: "old" }));
+	const old = registry.peekSettlement("una");
+	await registry.deliver("una", "new task");
+	await registry.complete(agent, completion({ output: "new" }));
+	assert.equal(registry.consumeSettlement("una", old), undefined);
+	registry.parentReachedBoundary();
+	assert.equal(announced, 1);
+});

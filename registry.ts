@@ -153,8 +153,8 @@ export class AgentRegistry {
 	private readonly settlementWaiters = new Map<string, Set<(settlement: AgentSettlement | null | undefined) => void>>();
 	/**
 	 * Completion/question announcements that settled during an active parent turn.
-	 * They are flushed only once the parent fully settles, unless agent_wait
-	 * consumes the cached settlement first. This prevents a stale queued
+	 * They are flushed at the next completed tool/model boundary, unless a
+	 * wait or inspection consumes the cached settlement first. This prevents a stale queued
 	 * follow-up from arriving after the model already read the same result.
 	 */
 	private readonly pendingAnnouncements = new Map<string, () => Promise<void> | void>();
@@ -217,6 +217,21 @@ export class AgentRegistry {
 		return this.settlements.get(agentId);
 	}
 
+	/** Reading a complete settled result acknowledges its queued announcement. */
+	consumeSettlement(agentId: string, expected?: AgentSettlement): AgentSettlement | undefined {
+		const settlement = this.settlements.get(agentId);
+		if (expected && settlement !== expected) return undefined;
+		if (settlement) this.pendingAnnouncements.delete(agentId);
+		return settlement;
+	}
+
+	/** Tool results are now persisted; queue unread results for the next model request. */
+	parentReachedBoundary(): void {
+		const pending = [...this.pendingAnnouncements.values()];
+		this.pendingAnnouncements.clear();
+		for (const announce of pending) void Promise.resolve(announce()).catch(() => {});
+	}
+
 	acceptsCompletion(agent: RegisteredAgent, completion: AgentCompletion): boolean {
 		return (
 			!this.closing &&
@@ -229,8 +244,8 @@ export class AgentRegistry {
 	/**
 	 * Record a child turn settling and wake explicit agent_wait callers.
 	 * If nobody is already waiting, an optional announcement is either sent
-	 * immediately while the parent is idle or deferred until the parent fully
-	 * settles. A later cached agent_wait consumes and cancels that announcement.
+	 * immediately while the parent is idle or deferred until its next safe boundary.
+	 * A complete result read by wait/inspect cancels that announcement.
 	 */
 	recordSettlement(agentId: string, settlement: AgentSettlement, announce?: () => Promise<void> | void): boolean {
 		const live = this.agents.get(agentId);
@@ -278,9 +293,7 @@ export class AgentRegistry {
 	 */
 	parentBecameIdle(): void {
 		this.parentActive = false;
-		const pending = [...this.pendingAnnouncements.values()];
-		this.pendingAnnouncements.clear();
-		for (const announce of pending) void Promise.resolve(announce()).catch(() => {});
+		this.parentReachedBoundary();
 		const now = Date.now();
 		for (const agentId of this.supervisedAgents) {
 			this.lastSupervisedAt.set(agentId, now);
@@ -359,7 +372,7 @@ export class AgentRegistry {
 		signal?: AbortSignal,
 		timeoutMs?: number,
 	): Promise<AgentSettlement | null | undefined> {
-		const cached = this.settlements.get(agentId);
+		const cached = this.consumeSettlement(agentId);
 		if (cached) {
 			// The parent explicitly consumed this already-settled turn. If its
 			// completion/question announcement was deferred during the active turn,

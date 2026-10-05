@@ -37,7 +37,7 @@ export function maybeWriteFullOutput(agentId: string, output: string): string {
 	return stashPath ? truncationMarker(stashPath) : "";
 }
 
-/** Deliver a completion notification: LLM JSON as follow-up + user card. */
+/** Deliver a completion notification: LLM JSON at the next safe boundary + user card. */
 export function notifyCompletion(pi: ExtensionAPI, agent: RegisteredAgent, completion: AgentCompletion): void {
 	const details: NotificationDetails = {
 		status: completion.status,
@@ -52,7 +52,9 @@ export function notifyCompletion(pi: ExtensionAPI, agent: RegisteredAgent, compl
 		// reported and cleaned up, so the idle marker must not appear there.
 		idle: (agent.shouldStayResident ?? agent.persistent) && completion.status === "completed" ? true : undefined,
 		usage: {
-			tokens: completion.stats.tokens || null,
+			tokens: completion.stats.tokens ?? null,
+			outputTokens: completion.stats.outputTokens,
+			contextTokens: completion.stats.contextTokens,
 			toolUses: completion.stats.toolUses || null,
 			durationMs: completion.stats.durationMs || null,
 		},
@@ -80,6 +82,6 @@ export function notifyCompletion(pi: ExtensionAPI, agent: RegisteredAgent, compl
 			display: true,
 			details,
 		},
-		{ deliverAs: "followUp", triggerTurn: true },
+		{ deliverAs: "steer", triggerTurn: true },
 	);
 }

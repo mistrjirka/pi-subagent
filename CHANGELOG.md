@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.9 — timely completion delivery and explicit usage counters
+
+- Deliver unread child completions at the next completed parent turn boundary, after tool results, instead of holding them until the parent finishes its entire response. Idle parents still receive a wake-up.
+- Acknowledge completed results returned by inspection as well as waiting; prevent a stale asynchronous inspection from acknowledging a newer child turn. Partial transcript inspection keeps unread completion notifications intact.
+- Label cumulative tokens including cache separately from generated tokens and estimated context usage. Preserve unknown context after compaction instead of displaying zero.
+- Add regression coverage with the real Pi agent loop and a deterministic provider fixture; no external model calls.
+
 ## 0.5.8 — bounded supervision and lifecycle race fixes
 
 - Preserve a resumed `ask_parent` child's final answer when it finishes. The wake-completion path now records the real completion through the normal registry policy before tearing down a non-persistent child, instead of racing `stopAndRemove()` and returning a synthetic `Agent stopped.` to an active `agent_wait`.

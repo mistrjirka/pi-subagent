@@ -266,6 +266,8 @@ export interface IncrementalMonitoringTranscript extends MonitoringTranscript {
 	hasMore: boolean;
 	/** Stable session entry id through which this read may advance. */
 	nextCursor?: string;
+	/** Stable IDs of messages actually returned, for cross-tool de-duplication. */
+	shownEntryIds?: string[];
 }
 
 function sessionEntryId(entry: unknown): string | undefined {
@@ -290,6 +292,7 @@ function renderUnreadEntryPage(
 	entries: readonly unknown[],
 	options: TranscriptFormatOptions = {},
 	nowMs: number = Date.now(),
+	alreadyShown?: ReadonlySet<string>,
 ): Omit<IncrementalMonitoringTranscript, "source" | "rpcError"> {
 	const maxMessages = Math.max(1, Math.floor(options.maxMessages ?? DEFAULT_MAX_MESSAGES));
 	const maxChars = Math.max(256, Math.floor(options.maxChars ?? DEFAULT_MAX_CHARS));
@@ -301,6 +304,7 @@ function renderUnreadEntryPage(
 		if (message === undefined) continue;
 		const entryId = sessionEntryId(entry);
 		if (!entryId) throw new Error("get_entries returned a message entry without an id");
+		if (alreadyShown?.has(entryId)) continue;
 		const timestampMs =
 			message && typeof message === "object" ? messageTimestampMs(message as Record<string, unknown>) : undefined;
 		const line = formatTranscriptMessageProjection(message, perMessageChars, timestampMs, nowMs);
@@ -317,6 +321,7 @@ function renderUnreadEntryPage(
 			returnedMessages: 0,
 			remainingMessages: 0,
 			hasMore: false,
+			shownEntryIds: [],
 			...(lastEntryId ? { nextCursor: lastEntryId } : {}),
 		};
 	}
@@ -344,6 +349,7 @@ function renderUnreadEntryPage(
 		remainingMessages,
 		hasMore: remainingMessages > 0,
 		nextCursor,
+		shownEntryIds: kept.map((item) => item.entryId),
 	};
 }
 
@@ -352,11 +358,12 @@ async function getIncrementalMonitoringTranscript(
 	since: string | undefined,
 	options: TranscriptFormatOptions,
 	sessionCursor: SessionEntryCursor,
+	alreadyShown?: ReadonlySet<string>,
 ): Promise<IncrementalMonitoringTranscript> {
 	if (agent.sessionPath) {
 		try {
 			const page = sessionCursor.read(agent.sessionPath, Math.max(1, options.maxMessages ?? DEFAULT_MAX_MESSAGES) + 1);
-			const formatted = renderUnreadEntryPage(page.entries, options);
+			const formatted = renderUnreadEntryPage(page.entries, options, Date.now(), alreadyShown);
 			sessionCursor.commit(formatted.nextCursor);
 			return {
 				...formatted,
@@ -394,7 +401,7 @@ async function getIncrementalMonitoringTranscript(
 	}
 	try {
 		const page = await agent.getEntries(since);
-		return { ...renderUnreadEntryPage(page.entries, options), source: "rpc" };
+		return { ...renderUnreadEntryPage(page.entries, options, Date.now(), alreadyShown), source: "rpc" };
 	} catch (error) {
 		const rpcError = error instanceof Error ? error.message : String(error);
 		return {
@@ -414,27 +421,101 @@ async function getIncrementalMonitoringTranscript(
  */
 export class IncrementalTranscriptCursor {
 	private afterEntryId: string | undefined;
+	private latestEntryId: string | undefined;
+	private readonly shownRecentIds = new Set<string>();
 	private queue: Promise<void> = Promise.resolve();
 	private readonly sessionCursor = new SessionEntryCursor();
 
+	private serialize<T>(work: () => Promise<T>): Promise<T> {
+		const result = this.queue.then(work);
+		this.queue = result.then(() => undefined, () => undefined);
+		return result;
+	}
+
+	/** Backfill oldest unread history. Messages already surfaced in a recent wait are skipped. */
 	read(
 		agent: TranscriptReadableAgent,
 		options: TranscriptFormatOptions = {},
 	): Promise<IncrementalMonitoringTranscript> {
-		const result = this.queue.then(async () => {
-			const snapshot = await getIncrementalMonitoringTranscript(agent, this.afterEntryId, options, this.sessionCursor);
+		return this.serialize(async () => {
+			const snapshot = await getIncrementalMonitoringTranscript(
+				agent, this.afterEntryId, options, this.sessionCursor, this.shownRecentIds,
+			);
 			if (snapshot.nextCursor) this.afterEntryId = snapshot.nextCursor;
+			for (const id of snapshot.shownEntryIds ?? []) this.shownRecentIds.add(id);
 			return snapshot;
 		});
-		this.queue = result.then(
-			() => undefined,
-			() => undefined,
-		);
-		return result;
+	}
+
+	/**
+	 * Supervision prioritizes new progress rather than repeatedly reading the start of a
+	 * long backlog. The older cursor stays untouched for agent_inspect.
+	 * A bounded session tail avoids fetching the whole child conversation over RPC.
+	 */
+	readRecent(
+		agent: TranscriptReadableAgent,
+		options: TranscriptFormatOptions = {},
+	): Promise<IncrementalMonitoringTranscript> {
+		return this.serialize(async () => {
+			if (!agent.sessionPath) {
+				// Older runtimes without a session file retain the safe incremental fallback.
+				const snapshot = await getIncrementalMonitoringTranscript(
+					agent, this.afterEntryId, options, this.sessionCursor, this.shownRecentIds,
+				);
+				if (snapshot.nextCursor) this.afterEntryId = snapshot.nextCursor;
+				for (const id of snapshot.shownEntryIds ?? []) this.shownRecentIds.add(id);
+				return snapshot;
+			}
+			const entries = recentSessionRecords(agent.sessionPath).filter(
+				(entry): entry is Record<string, unknown> =>
+					Boolean(entry && typeof entry === "object" && (entry as Record<string, unknown>).type === "message"
+						&& sessionEntryId(entry)),
+			);
+			if (!entries.length) {
+				// An inaccessible or not-yet-complete session may still be available by RPC.
+				const snapshot = await getIncrementalMonitoringTranscript(
+					agent, this.afterEntryId, options, this.sessionCursor, this.shownRecentIds,
+				);
+				if (snapshot.nextCursor) this.afterEntryId = snapshot.nextCursor;
+				for (const id of snapshot.shownEntryIds ?? []) this.shownRecentIds.add(id);
+				return snapshot;
+			}
+			const lastIndex = this.latestEntryId ? entries.findIndex((entry) => entry.id === this.latestEntryId) : -1;
+			const fresh = entries.slice(lastIndex + 1).filter((entry) => !this.shownRecentIds.has(entry.id as string));
+			// Do not regress to older entries when the child produces nothing new.
+			this.latestEntryId = entries.at(-1)?.id as string;
+			const maxMessages = Math.max(1, Math.floor(options.maxMessages ?? DEFAULT_MAX_MESSAGES));
+			const maxChars = Math.max(256, Math.floor(options.maxChars ?? DEFAULT_MAX_CHARS));
+			const perMessageChars = Math.max(128, Math.floor(options.perMessageChars ?? DEFAULT_PER_MESSAGE_CHARS));
+			const lines: string[] = [];
+			let used = 0;
+			for (const entry of fresh.reverse()) {
+				if (lines.length >= maxMessages) break;
+				const message = sessionMessageFromEntry(entry);
+				const timestampMs = message && typeof message === "object"
+					? messageTimestampMs(message as Record<string, unknown>) : undefined;
+				const line = formatTranscriptMessageProjection(message, perMessageChars, timestampMs);
+				if (!line) continue;
+				const cost = line.detailed.length + (lines.length ? 2 : 0);
+				if (lines.length && used + cost > maxChars) break;
+				lines.push(line.detailed);
+				used += cost;
+				this.shownRecentIds.add(entry.id as string);
+			}
+			const remainingMessages = fresh.length - lines.length;
+			return {
+				text: lines.length ? truncate(lines.join("\n\n"), maxChars) : "[no new recent transcript messages]",
+				source: "session",
+				returnedMessages: lines.length,
+				remainingMessages,
+				remainingMessagesExact: false,
+				hasMore: remainingMessages > 0,
+			};
+		});
 	}
 }
 
-export function recentSessionMessages(sessionPath: string, maxBytes = 512 * 1024): unknown[] {
+function recentSessionRecords(sessionPath: string, maxBytes = 512 * 1024): unknown[] {
 	let fd: number | undefined;
 	try {
 		fd = openSync(sessionPath, "r");
@@ -449,22 +530,28 @@ export function recentSessionMessages(sessionPath: string, maxBytes = 512 * 1024
 			const firstNl = text.indexOf("\n");
 			text = firstNl >= 0 ? text.slice(firstNl + 1) : "";
 		}
-		const messages: unknown[] = [];
+		const records: unknown[] = [];
 		for (const line of text.split("\n")) {
 			if (!line.trim()) continue;
 			try {
-				const message = sessionMessageFromEntry(JSON.parse(line));
-				if (message !== undefined) messages.push(message);
+				records.push(JSON.parse(line));
 			} catch {
 				// A concurrently-appended final line can be partial; ignore it.
 			}
 		}
-		return messages;
+		return records;
 	} catch {
 		return [];
 	} finally {
 		if (fd !== undefined) closeSync(fd);
 	}
+}
+
+
+export function recentSessionMessages(sessionPath: string, maxBytes = 512 * 1024): unknown[] {
+	return recentSessionRecords(sessionPath, maxBytes)
+		.map(sessionMessageFromEntry)
+		.filter((message) => message !== undefined);
 }
 
 export function formatRecentActivity(

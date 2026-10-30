@@ -340,7 +340,11 @@ const SUPERVISION_REMINDER_MS = 180_000;
 function activitySummary(activity: AgentActivity | undefined): string {
 	if (!activity) return "no recent activity reported";
 	if (activity.kind === "thinking") return "thinking";
-	if (activity.kind === "tool") return `${activity.name}${activity.args ? ` — ${activity.args}` : ""}`;
+	if (activity.kind === "tool") {
+		const args = activity.args.replace(/\s+/g, " ").trim();
+		const excerpt = Array.from(args).slice(0, 180).join("");
+		return `${activity.name}${excerpt ? ` — ${excerpt}${Array.from(args).length > 180 ? "…" : ""}` : ""}`;
+	}
 	const text = activity.text.replace(/\s+/g, " ").trim();
 	return text ? `writing — ${Array.from(text).slice(-180).join("")}` : "writing";
 }
@@ -456,20 +460,20 @@ export default function (pi: ExtensionAPI) {
 		return { isError: true };
 	});
 
-	// One shared unread-transcript cursor per direct child. agent_wait and
-	// agent_inspect consume the same append-ordered stream, so either tool sees
-	// only messages the parent has not already received through those tools.
+	// One shared transcript reader per direct child. Wait prioritizes new progress;
+	// inspect backfills older unread history. Delivered entries are not repeated.
 	const transcriptCursors = new Map<string, IncrementalTranscriptCursor>();
 	const unreadTranscript = (
 		agent: RegisteredAgent,
 		options: { maxMessages: number; maxChars: number; perMessageChars: number },
+		newestFirst = false,
 	) => {
 		let cursor = transcriptCursors.get(agent.agentId);
 		if (!cursor) {
 			cursor = new IncrementalTranscriptCursor();
 			transcriptCursors.set(agent.agentId, cursor);
 		}
-		return cursor.read(agent, options);
+		return newestFirst ? cursor.readRecent(agent, options) : cursor.read(agent, options);
 	};
 
 	// One registry per session: owns the running-agent bookkeeping, the
@@ -1133,11 +1137,11 @@ export default function (pi: ExtensionAPI) {
 		name: "agent_wait",
 		label: "Wait for Agent",
 		description:
-			"Wait for a direct child to settle, fail/stop, or ask its parent a question. timeout_seconds limits only this wait call: expiry returns only transcript messages not already returned by agent_wait/agent_inspect and never stops the child. Omit it for the default 180-second supervision window.",
+			"Wait for a direct child to settle, fail/stop, or ask its parent a question. timeout_seconds limits only this wait call. Expiry shows the newest progress, while agent_inspect can read older history. Neither stops the child. Omit for the default 180-second supervision window.",
 		promptSnippet: "Wait for a background or resumed child to settle",
 		promptGuidelines: [
 			"Use agent_wait when a background child's result becomes the next dependency instead of polling shell/status output.",
-			"For supervision, a 150-second wait window is a useful cadence. On timeout, agent_wait returns the latest activity marker plus an unread transcript page shared with agent_inspect. Previously returned transcript messages are not repeated. If the page says unread messages remain, drain them immediately with agent_inspect; otherwise wait again when the child is making progress.",
+			"For supervision, a 150-second wait window is a useful cadence. On timeout, agent_wait prioritizes newest progress (bounded and not repeated) while agent_inspect pages through older unread history. Inspect older messages only when needed to understand a problem or decision. If the child is making progress, wait again. The two tools avoid repeating already shown transcript entries.",
 			"If timeout_seconds is omitted, agent_wait uses a 180-second supervision window. timeout_seconds: 0 returns an immediate live snapshot.",
 			"If agent_wait returns an ask_parent question, answer that same child with agent_send; call agent_wait again only after the answer when you need the resumed result.",
 		],
@@ -1175,10 +1179,10 @@ export default function (pi: ExtensionAPI) {
 				const activity = live.getLatestActivity?.();
 				const elapsedMs = live.startedAt ? Date.now() - live.startedAt : undefined;
 				const transcript = await unreadTranscript(live, {
-					maxMessages: 50,
-					maxChars: 10_000,
-					perMessageChars: 2_500,
-				});
+					maxMessages: 8,
+					maxChars: 8_000,
+					perMessageChars: 1_500,
+				}, true);
 				const window = timeoutSeconds === 0 ? "Status snapshot" : `Wait window of ${timeoutSeconds}s expired`;
 				return {
 					content: [
@@ -1188,7 +1192,7 @@ export default function (pi: ExtensionAPI) {
 								`${window}; ${atId(agentId)} is still ${reportedAgentState(live)}. Latest activity: ${activitySummary(activity)}. ` +
 								"The wait window did not stop the agent. SUPERVISION CHECK REQUIRED: use the latest activity and unread transcript below to judge whether the child is making real progress before waiting again. " +
 								"If it is, wait again; if it looks stuck, is repeating itself, or has wandered off the task, steer it with agent_send, inspect it, or stop it." +
-								`\n\nUnread transcript (${transcript.returnedMessages} shown${transcript.hasMore ? `, ${transcript.remainingMessagesExact === false ? "at least " : ""}${transcript.remainingMessages} still unread` : ""}; ${transcript.source}):\n${transcript.text}`,
+								`\n\nNewest progress (${transcript.returnedMessages} messages, newest first; ${transcript.source}):\n${transcript.text}\n\nFor older unread history, use agent_inspect when needed.`,
 						},
 					],
 					details: {

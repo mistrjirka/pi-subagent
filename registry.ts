@@ -66,6 +66,12 @@ export interface AgentSettlement {
 	question?: AgentQuestion;
 }
 
+/** An ordinary child message interrupts agent_wait without settling the child. */
+export interface AgentWaitMessage {
+	kind: "message";
+	message: AgentMessage;
+}
+
 /** Narrow widget surface — index.ts adapts the TUI AgentWidget to it. */
 export interface WidgetSurface {
 	/** `status` = the row's lifecycle state at registration (background settle = running;
@@ -150,7 +156,12 @@ export class AgentRegistry {
 	private readonly hasParent: boolean;
 	/** Latest settled turn for each id; retained so agent_wait can arrive after completion. */
 	private readonly settlements = new Map<string, AgentSettlement>();
-	private readonly settlementWaiters = new Map<string, Set<(settlement: AgentSettlement | null | undefined) => void>>();
+	private readonly settlementWaiters = new Map<
+		string,
+		Set<(settlement: AgentSettlement | AgentWaitMessage | null | undefined) => void>
+	>();
+	/** Only explicit agent_wait calls subscribe. Child messages wake them without a duplicate steer. */
+	private readonly messageWaiters = new Set<(message: AgentWaitMessage) => void>();
 	/**
 	 * Completion/question announcements that settled during an active parent turn.
 	 * They are flushed at the next completed tool/model boundary, unless a
@@ -272,6 +283,19 @@ export class AgentRegistry {
 		return false;
 	}
 
+	/**
+	 * A child sending @parent must wake a parent blocked in any agent_wait,
+	 * including one watching a different child. The wait's tool result delivers
+	 * the message to the model, so the caller must not also queue a steer.
+	 * Outside a wait, the existing pi.sendMessage path remains authoritative.
+	 */
+	wakeWaitForMessage(message: AgentMessage): boolean {
+		if (this.closing || this.messageWaiters.size === 0) return false;
+		const event: AgentWaitMessage = { kind: "message", message };
+		for (const wake of [...this.messageWaiters]) wake(event);
+		return true;
+	}
+
 	/** Start/restart fallback supervision for a live direct child. */
 	startSupervision(agentId: string): void {
 		if (this.supervisionIntervalMs <= 0 || !this.agents.has(agentId)) return;
@@ -367,11 +391,23 @@ export class AgentRegistry {
 	 * Block until this direct child settles. When timeoutMs is provided, null
 	 * means the child is still running; the timeout never stops the child.
 	 */
+	waitForSettlement(
+		agentId: string,
+		signal?: AbortSignal,
+		timeoutMs?: number,
+	): Promise<AgentSettlement | null | undefined>;
+	waitForSettlement(
+		agentId: string,
+		signal: AbortSignal | undefined,
+		timeoutMs: number | undefined,
+		wakeOnMessage: true,
+	): Promise<AgentSettlement | AgentWaitMessage | null | undefined>;
 	async waitForSettlement(
 		agentId: string,
 		signal?: AbortSignal,
 		timeoutMs?: number,
-	): Promise<AgentSettlement | null | undefined> {
+		wakeOnMessage = false,
+	): Promise<AgentSettlement | AgentWaitMessage | null | undefined> {
 		const cached = this.consumeSettlement(agentId);
 		if (cached) {
 			// The parent explicitly consumed this already-settled turn. If its
@@ -390,36 +426,36 @@ export class AgentRegistry {
 			this.resumeSupervision(agentId);
 			return null;
 		}
-		return await new Promise<AgentSettlement | null | undefined>((resolve, reject) => {
-			const waiters = this.settlementWaiters.get(agentId) ?? new Set();
+		return await new Promise<AgentSettlement | AgentWaitMessage | null | undefined>((resolve, reject) => {
+			const waiters =
+				this.settlementWaiters.get(agentId) ??
+				new Set<(event: AgentSettlement | AgentWaitMessage | null | undefined) => void>();
 			let timer: ReturnType<typeof setTimeout> | undefined;
-			const cleanup = () => {
-				signal?.removeEventListener("abort", onAbort);
-				if (timer) clearTimeout(timer);
-				this.resumeSupervision(agentId);
-			};
-			const finish = (settlement: AgentSettlement | null | undefined) => {
-				cleanup();
-				resolve(settlement);
-			};
 			const detachWaiter = () => {
 				waiters.delete(finish);
 				if (waiters.size === 0) this.settlementWaiters.delete(agentId);
 			};
-			const onAbort = () => {
+			const cleanup = () => {
 				detachWaiter();
+				this.messageWaiters.delete(wake);
+				signal?.removeEventListener("abort", onAbort);
+				if (timer) clearTimeout(timer);
+				this.resumeSupervision(agentId);
+			};
+			const finish = (event: AgentSettlement | AgentWaitMessage | null | undefined) => {
+				cleanup();
+				resolve(event);
+			};
+			const wake = (message: AgentWaitMessage) => finish(message);
+			const onAbort = () => {
 				cleanup();
 				reject(new Error("agent_wait cancelled"));
 			};
 			waiters.add(finish);
 			this.settlementWaiters.set(agentId, waiters);
+			if (wakeOnMessage) this.messageWaiters.add(wake);
 			signal?.addEventListener("abort", onAbort, { once: true });
-			if (timeoutMs !== undefined) {
-				timer = setTimeout(() => {
-					detachWaiter();
-					finish(null);
-				}, timeoutMs);
-			}
+			if (timeoutMs !== undefined) timer = setTimeout(() => finish(null), timeoutMs);
 		});
 	}
 

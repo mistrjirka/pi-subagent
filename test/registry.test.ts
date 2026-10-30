@@ -398,6 +398,70 @@ describe("AgentRegistry — explicit wait", () => {
 		assert.equal(agent.stopCalls, 0);
 	});
 
+	it("ordinary child messages wake agent_wait immediately without settling or duplicating them", async () => {
+		const { registry } = makeRegistry(null);
+		const worker = new FakeAgent("blair");
+		registry.register(worker);
+		const waiting = registry.waitForSettlement("blair", undefined, 300_000, true);
+		const message: AgentMessage = { to: "@parent", from: "blair", message: "Need a policy decision" };
+
+		assert.equal(registry.wakeWaitForMessage(message), true);
+		assert.deepEqual(await waiting, { kind: "message", message });
+		assert.equal(registry.wakeWaitForMessage(message), false, "a delivered message must not be queued twice");
+		assert.equal(registry.lookup("blair"), worker);
+		assert.equal(worker.stopCalls, 0);
+
+		const resumedWait = registry.waitForSettlement("blair", undefined, 300_000, true);
+		registry.recordSettlement("blair", { completion: completion({ output: "done" }) });
+		const completed = await resumedWait;
+		assert.ok(completed && "completion" in completed);
+		assert.equal(completed.completion.output, "done");
+		assert.equal(registry.wakeWaitForMessage(message), false, "settled wait must release its message listener");
+	});
+
+	it("a message from another child wakes a wait, keeping sender attribution", async () => {
+		const { registry } = makeRegistry(null);
+		registry.register(new FakeAgent("blair"));
+		registry.register(new FakeAgent("mio"));
+		const waiting = registry.waitForSettlement("blair", undefined, 300_000, true);
+		const message: AgentMessage = { to: "@parent", from: "mio", message: "Found a blocker" };
+		assert.equal(registry.wakeWaitForMessage(message), true);
+		assert.deepEqual(await waiting, { kind: "message", message });
+		assert.equal(registry.lookup("blair")?.status, "running");
+		assert.equal(registry.lookup("mio")?.status, "running");
+	});
+
+	it("messages outside agent_wait still use the normal parent notification channel", async () => {
+		const { registry } = makeRegistry(null);
+		registry.register(new FakeAgent("blair"));
+		const message: AgentMessage = { to: "@parent", from: "blair", message: "Progress" };
+		assert.equal(registry.wakeWaitForMessage(message), false);
+		const waiting = registry.waitForSettlement("blair", undefined, 3, true);
+		assert.equal(await waiting, null);
+		assert.equal(registry.wakeWaitForMessage(message), false, "timeout must release the message listener");
+	});
+
+	it("canceled waits do not consume future child messages", async () => {
+		const { registry } = makeRegistry(null);
+		registry.register(new FakeAgent("blair"));
+		const controller = new AbortController();
+		const waiting = registry.waitForSettlement("blair", controller.signal, 300_000, true);
+		controller.abort();
+		await assert.rejects(waiting, /agent_wait cancelled/);
+		assert.equal(registry.wakeWaitForMessage({ to: "@parent", from: "blair", message: "After cancel" }), false);
+	});
+
+	it("a child settling first cannot later wake an already-completed wait", async () => {
+		const { registry } = makeRegistry(null);
+		registry.register(new FakeAgent("blair"));
+		const waiting = registry.waitForSettlement("blair", undefined, 300_000, true);
+		registry.recordSettlement("blair", { completion: completion({ output: "finished" }) });
+		const completed = await waiting;
+		assert.ok(completed && "completion" in completed);
+		assert.equal(completed.completion.output, "finished");
+		assert.equal(registry.wakeWaitForMessage({ to: "@parent", from: "blair", message: "After settlement" }), false);
+	});
+
 	it("clears the old settlement when agent_send starts a new turn", async () => {
 		const { registry } = makeRegistry(null);
 		const agent = new FakeAgent("a1", "stay", true);

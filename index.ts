@@ -57,6 +57,7 @@ import { type AgentMessage, type AgentQuestion, formatFrom } from "./protocol.js
 import {
 	AgentRegistry,
 	type AgentSettlement,
+	type AgentWaitMessage,
 	buildAncestorChain,
 	type RegisteredAgent,
 	type WidgetSurface,
@@ -392,6 +393,9 @@ async function handleMessage(
 	outbound: boolean,
 ): Promise<{ ok: boolean; verb?: string; error?: string }> {
 	if (!outbound && msg.to === "@parent") {
+		// Finish an active agent_wait now. The tool result delivers the message;
+		// queueing a steer too would show it a second time.
+		if (registry.wakeWaitForMessage(msg)) return { ok: true, verb: "delivered" };
 		// A child addressing "@parent" means this receiving session. Do not
 		// re-route it using this process's own parent capability: at the root
 		// that would incorrectly turn a successful child→root delivery into
@@ -1137,13 +1141,14 @@ export default function (pi: ExtensionAPI) {
 		name: "agent_wait",
 		label: "Wait for Agent",
 		description:
-			"Wait for a direct child to settle, fail/stop, or ask its parent a question. timeout_seconds limits only this wait call. Expiry shows the newest progress, while agent_inspect can read older history. Neither stops the child. Omit for the default 180-second supervision window.",
+			"Wait for a direct child to settle, fail/stop, ask its parent a question, or receive any child message to @parent. Child messages wake the wait immediately. timeout_seconds limits this call; expiry shows newest progress. Neither stops the child. Default 180 seconds.",
 		promptSnippet: "Wait for a background or resumed child to settle",
 		promptGuidelines: [
 			"Use agent_wait when a background child's result becomes the next dependency instead of polling shell/status output.",
 			"For supervision, a 150-second wait window is a useful cadence. On timeout, agent_wait prioritizes newest progress (bounded and not repeated) while agent_inspect pages through older unread history. Inspect older messages only when needed to understand a problem or decision. If the child is making progress, wait again. The two tools avoid repeating already shown transcript entries.",
 			"If timeout_seconds is omitted, agent_wait uses a 180-second supervision window. timeout_seconds: 0 returns an immediate live snapshot.",
 			"If agent_wait returns an ask_parent question, answer that same child with agent_send; call agent_wait again only after the answer when you need the resumed result.",
+			"If agent_wait returns an ordinary message from any child, handle it immediately. The child remains running. Reply with agent_send if needed, then resume supervision.",
 		],
 		parameters: WaitParamsSchema,
 
@@ -1167,9 +1172,9 @@ export default function (pi: ExtensionAPI) {
 				content: [{ type: "text", text: `Waiting for ${atId(agentId)} (${waitLabel})…` }],
 				details: { agentId, timeoutSeconds },
 			});
-			let settlement: AgentSettlement | null | undefined;
+			let settlement: AgentSettlement | AgentWaitMessage | null | undefined;
 			try {
-				settlement = await registry.waitForSettlement(agentId, signal, timeoutMs);
+				settlement = await registry.waitForSettlement(agentId, signal, timeoutMs, true);
 			} catch (error) {
 				return toErrorResult(error);
 			}
@@ -1178,11 +1183,15 @@ export default function (pi: ExtensionAPI) {
 				if (!live) return toErrorResult(`Agent ${atId(agentId)} stopped being waitable while the wait window expired.`);
 				const activity = live.getLatestActivity?.();
 				const elapsedMs = live.startedAt ? Date.now() - live.startedAt : undefined;
-				const transcript = await unreadTranscript(live, {
-					maxMessages: 8,
-					maxChars: 8_000,
-					perMessageChars: 1_500,
-				}, true);
+				const transcript = await unreadTranscript(
+					live,
+					{
+						maxMessages: 8,
+						maxChars: 8_000,
+						perMessageChars: 1_500,
+					},
+					true,
+				);
 				const window = timeoutSeconds === 0 ? "Status snapshot" : `Wait window of ${timeoutSeconds}s expired`;
 				return {
 					content: [
@@ -1207,6 +1216,18 @@ export default function (pi: ExtensionAPI) {
 				};
 			}
 			if (!settlement) return toErrorResult(`Unknown or no-longer-waitable direct child ${atId(agentId)}.`);
+			if ("message" in settlement) {
+				const message = settlement.message;
+				return {
+					content: [
+						{
+							type: "text",
+							text: `Message from ${atId(message.from)} during agent_wait for ${atId(agentId)}:\n${formatFrom(message.from)}${message.message}\n\nThe wait ended immediately; the child is still running. Reply with agent_send if needed, then resume supervision.`,
+						},
+					],
+					details: { agentId, state: "message", from: message.from, message: message.message, wokenByMessage: true },
+				};
+			}
 			const completion = settlement.completion;
 			if (settlement.waitingForParent && settlement.question) {
 				const contextLine = settlement.question.context ? `\nContext: ${settlement.question.context}` : "";

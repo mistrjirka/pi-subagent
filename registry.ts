@@ -223,6 +223,36 @@ export class AgentRegistry {
 		return this.agents.get(agentId);
 	}
 
+	/**
+	 * Compact direct-child address book for a failed agent_send.
+	 * Running and resident children are deliverable; exited children are
+	 * inspectable but cannot be resumed. Never advertise descendants.
+	 */
+	describeMessageTargets(target: string, limit = 8): string {
+		const active = [...this.agents.values()];
+		const ended = [...this.settlements.entries()].filter(([id]) => !this.agents.has(id));
+		const targetSettlement = this.settlements.get(target);
+		const targetNote =
+			!this.agents.has(target) && targetSettlement
+				? `@${target} finished (${targetSettlement.completion.status}); its process exited and cannot receive agent_send. `
+				: "";
+		const available = active.slice(0, limit).map((agent) => {
+			const state = agent.awaitingParent
+				? "waiting for answer"
+				: agent.status === "completed"
+					? "idle, reusable"
+					: (agent.status ?? "running");
+			return `@${agent.agentId} (${agent.label}, ${state})`;
+		});
+		const completed = ended.slice(-limit).map(([id, settlement]) => `@${id} (${settlement.completion.status}, exited)`);
+		return (
+			targetNote +
+			`Deliverable direct children: ${available.join(", ") || "none"}${active.length > limit ? ` (+${active.length - limit} more)` : ""}. ` +
+			`Finished/exited: ${completed.join(", ") || "none"}${ended.length > limit ? ` (+${ended.length - limit} more)` : ""}. ` +
+			"Use agent_inspect on a finished child to read its result. To continue work after it exited, spawn a new child; only resident children accept agent_send."
+		);
+	}
+
 	/** Known completed tasks remain inspectable after their processes exit. */
 	peekSettlement(agentId: string): AgentSettlement | undefined {
 		return this.settlements.get(agentId);

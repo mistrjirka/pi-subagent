@@ -1466,9 +1466,17 @@ export default function (pi: ExtensionAPI) {
 			const r = await handleMessage(pi, registry, { to: target, from: MY_AGENT_ID, message }, true);
 			if (r.ok && !HAS_PARENT && target !== "@parent" && registry.lookup(target)) registry.startSupervision(target);
 			if (!r.ok) {
+				const reason = r.error ?? "delivery failed";
+				const isUnknownChild =
+					target !== "@parent" && (reason.startsWith("no such agent:") || reason.startsWith("delivery to "));
+				const text = isUnknownChild
+					? `${reason}
+
+${registry.describeMessageTargets(target)}`
+					: reason;
 				return {
-					content: [{ type: "text", text: r.error ?? "delivery failed" }],
-					details: { to: target, error: r.error },
+					content: [{ type: "text", text }],
+					details: { to: target, error: reason },
 					isError: true,
 				};
 			}

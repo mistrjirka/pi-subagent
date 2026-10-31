@@ -152,6 +152,33 @@ describe("AgentRegistry — tracking", () => {
 		const { registry } = makeRegistry();
 		assert.equal(registry.lookup("nope"), undefined);
 	});
+
+	it("a failed send can list running, resident and exited direct children", async () => {
+		const { registry } = makeRegistry();
+		const running = new FakeAgent("blair", "stage-1");
+		registry.register(running);
+		const resident = new FakeAgent("mio", "stage-2", true);
+		resident.status = "completed";
+		registry.register(resident, "idle");
+		const exited = new FakeAgent("tara", "stage-3");
+		registry.register(exited);
+		await registry.complete(exited, completion({ status: "completed" }));
+		const text = registry.describeMessageTargets("tara");
+		assert.match(text, /@tara finished \(completed\)/);
+		assert.match(text, /@blair \(stage-1, running\)/);
+		assert.match(text, /@mio \(stage-2, idle, reusable\)/);
+		assert.match(text, /@tara \(completed, exited\)/);
+		assert.doesNotMatch(text, /@tara \(stage-3, running\)/);
+	});
+
+	it("a failed send only suggests this hop's children and bounds the listing", () => {
+		const { registry } = makeRegistry();
+		for (let i = 0; i < 13; i++) registry.register(new FakeAgent(`a${i}`));
+		const text = registry.describeMessageTargets("unknown");
+		assert.match(text, /\(\+5 more\)/);
+		assert.doesNotMatch(text, /@a12 \(/);
+		assert.match(text, /Finished\/exited: none/);
+	});
 });
 
 describe("AgentRegistry — completion policy", () => {

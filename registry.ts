@@ -181,6 +181,8 @@ export class AgentRegistry {
 	private readonly lastSupervisedAt = new Map<string, number>();
 	/** Names handed out this session — re-roll on collision (pool ~200). */
 	private readonly usedNames = new Set<string>();
+	/** Recent successful diagnostic sends; normal instructions and urgent sends are never filtered. */
+	private readonly recentDiagnostics = new Map<string, number>();
 
 	constructor(deps: AgentRegistryDeps) {
 		this.notify = deps.notify;
@@ -251,6 +253,27 @@ export class AgentRegistry {
 			`Finished/exited: ${completed.join(", ") || "none"}${ended.length > limit ? ` (+${ended.length - limit} more)` : ""}. ` +
 			"Use agent_inspect on a finished child to read its result. To continue work after it exited, spawn a new child; only resident children accept agent_send."
 		);
+	}
+
+	/** True for an identical diagnostic previously sent to this child within ten minutes. */
+	wasDiagnosticSentRecently(target: string, message: string, now = Date.now()): boolean {
+		const key = target + "\0" + message.trim().replace(/\s+/g, " ");
+		const previous = this.recentDiagnostics.get(key);
+		return previous !== undefined && now >= previous && now - previous < 600_000;
+	}
+
+	/** Only successful deliveries are recorded. Old entries are bounded and pruned. */
+	recordSentDiagnostic(target: string, message: string, now = Date.now()): void {
+		for (const [key, at] of this.recentDiagnostics) {
+			if (now - at >= 600_000) this.recentDiagnostics.delete(key);
+		}
+		const key = target + "\0" + message.trim().replace(/\s+/g, " ");
+		this.recentDiagnostics.set(key, now);
+		while (this.recentDiagnostics.size > 100) {
+			const oldest = this.recentDiagnostics.keys().next().value;
+			if (oldest === undefined) break;
+			this.recentDiagnostics.delete(oldest);
+		}
 	}
 
 	/** Known completed tasks remain inspectable after their processes exit. */

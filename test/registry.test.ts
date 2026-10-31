@@ -148,6 +148,26 @@ describe("AgentRegistry — tracking", () => {
 		assert.deepEqual(widget?.adds, [{ id: "max", status: "idle" }]);
 	});
 
+	it("deduplicates only identical diagnostics to the same child within ten minutes", () => {
+		const { registry } = makeRegistry();
+		const finding = "verification.ts:123 missing verificationQuestions";
+		const now = 1_800_000;
+		assert.equal(registry.wasDiagnosticSentRecently("tara", finding, now), false);
+		registry.recordSentDiagnostic("tara", finding, now);
+		assert.equal(registry.wasDiagnosticSentRecently("tara", finding, now + 10_000), true);
+		assert.equal(registry.wasDiagnosticSentRecently("tara", "  " + finding + "  ", now + 10_000), true);
+		assert.equal(registry.wasDiagnosticSentRecently("other", finding, now + 10_000), false);
+		assert.equal(registry.wasDiagnosticSentRecently("tara", finding + " (new)", now + 10_000), false);
+		assert.equal(registry.wasDiagnosticSentRecently("tara", finding, now + 600_000), false);
+	});
+
+	it("bounds diagnostic tracking memory", () => {
+		const { registry } = makeRegistry();
+		for (let i = 0; i < 140; i++) registry.recordSentDiagnostic("tara", "finding-" + i, 1_800_000);
+		assert.equal(registry.wasDiagnosticSentRecently("tara", "finding-0", 1_800_001), false);
+		assert.equal(registry.wasDiagnosticSentRecently("tara", "finding-139", 1_800_001), true);
+	});
+
 	it("lookup returns undefined for unknown ids", () => {
 		const { registry } = makeRegistry();
 		assert.equal(registry.lookup("nope"), undefined);

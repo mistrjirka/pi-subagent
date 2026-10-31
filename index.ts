@@ -229,6 +229,8 @@ interface StopParams {
 interface SendParams {
 	to: string;
 	message: string;
+	kind?: "instruction" | "diagnostic" | "urgent";
+	evidence?: string;
 }
 
 interface AskParentParams {
@@ -321,6 +323,15 @@ const SendParamsSchema = Type.Object({
 			'notification carries it), or "@parent" to message the session that spawned you.',
 	}),
 	message: Type.String({ description: "The message text." }),
+	kind: Type.Optional(
+		Type.Union([Type.Literal("instruction"), Type.Literal("diagnostic"), Type.Literal("urgent")], {
+			description:
+				"Set diagnostic for verified current findings. Use urgent for safety or scope violations. Default instruction.",
+		}),
+	),
+	evidence: Type.Optional(
+		Type.String({ description: "For kind=diagnostic, concrete fresh evidence: file, finding, and validation source." }),
+	),
 });
 
 const AskParentParamsSchema = Type.Object({
@@ -1431,6 +1442,8 @@ export default function (pi: ExtensionAPI) {
 		promptGuidelines: [
 			"Send follow-up instructions to a persistent or waiting agent with agent_send — its context is intact and it wakes to handle the message.",
 			"When a child is waiting after ask_parent, answer that exact child id with agent_send rather than spawning a replacement.",
+			"Do not echo a child’s tool output or transient pi-lens warning. Only forward a current, verified, still-actionable diagnostic using kind=diagnostic with concrete evidence. Identical findings to the same child are deduplicated for ten minutes.",
+			"Use kind=urgent for safety violations, destructive scope mistakes, or immediate cross-owner conflicts. Urgent steering is never deduplicated.",
 		],
 		parameters: SendParamsSchema,
 
@@ -1459,11 +1472,27 @@ export default function (pi: ExtensionAPI) {
 				};
 			}
 
+			if (params.kind === "diagnostic") {
+				if (!params.evidence?.trim() || params.evidence.trim().length < 15) {
+					return toErrorResult(
+						"Diagnostic steering needs current evidence: file, finding, and validation source. Do not relay unverified pi-lens output.",
+					);
+				}
+				if (registry.lookup(target) && registry.wasDiagnosticSentRecently(target, message)) {
+					return {
+						content: [
+							{ type: "text", text: `Same diagnostic already sent to ${atId(target)} within ten minutes; not resent.` },
+						],
+						details: { to: target, suppressedDuplicate: true },
+					};
+				}
+			}
 			onUpdate?.({
 				content: [{ type: "text", text: `Sending to ${atId(target)}\u2026` }],
 				details: { to: target },
 			});
 			const r = await handleMessage(pi, registry, { to: target, from: MY_AGENT_ID, message }, true);
+			if (r.ok && params.kind === "diagnostic") registry.recordSentDiagnostic(target, message);
 			if (r.ok && !HAS_PARENT && target !== "@parent" && registry.lookup(target)) registry.startSupervision(target);
 			if (!r.ok) {
 				const reason = r.error ?? "delivery failed";

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.10 — restart-safe persistent worker recovery
+
+- Save private recovery metadata for persistent root-owned workers and keep transcripts in their original Pi session files.
+- Provide root-only `agent_recover` to list recoverable workers and `agent_spawn.resume_id` to continue a matching prior context with a fresh task instruction.
+- Validate the loaded history before running a prompt, and reject incorrect project, Git branch, profile or model, tampered transcripts, explicit stops and live ownership conflicts. Serialize stale-lease reclamation.
+- Add recovery tests and verify Pi's real RPC session loading with synthetic local history and no model inference.
+
+
 ## 0.5.9 — timely completion delivery and explicit usage counters
 
 - Deliver unread child completions at the next completed parent turn boundary, after tool results, instead of holding them until the parent finishes its entire response. Idle parents still receive a wake-up.

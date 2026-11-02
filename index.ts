@@ -54,6 +54,7 @@ import {
 	resolveAgentProfile,
 } from "./profiles.js";
 import { type AgentMessage, type AgentQuestion, formatFrom } from "./protocol.js";
+import { RecoveryStore } from "./recovery.js";
 import {
 	AgentRegistry,
 	type AgentSettlement,
@@ -207,6 +208,8 @@ interface SpawnParams {
 	label?: string;
 	run_in_background?: boolean;
 	persistent?: boolean;
+	/** Root-only: explicit id from agent_recover, requiring a new scoped prompt. */
+	resume_id?: string;
 }
 
 /** agent_wait tool params. */
@@ -281,6 +284,12 @@ export function buildSpawnParamsSchema(hasParent: boolean): ReturnType<typeof Ty
 						Type.Boolean({
 							description:
 								"Root-only execution choice. Omitted/true returns immediately in background; false waits in foreground. Nested agents are always foreground.",
+						}),
+					),
+					resume_id: Type.Optional(
+						Type.String({
+							description:
+								"Recovery id from agent_recover for the same project, Git branch, and role. Loads the saved child transcript and sends this prompt as a NEW turn; it never replays work automatically.",
 						}),
 					),
 				}),
@@ -461,6 +470,7 @@ export default function (pi: ExtensionAPI) {
 	// keeping the details (status line) intact.
 	pi.on("tool_result", async (event) => {
 		if (
+			event.toolName !== "agent_recover" &&
 			event.toolName !== "agent_spawn" &&
 			event.toolName !== "agent_wait" &&
 			event.toolName !== "agent_inspect" &&
@@ -543,6 +553,15 @@ export default function (pi: ExtensionAPI) {
 		hasParent: HAS_PARENT,
 	});
 	const controlBridges = new Set<ExternalControlBridge>();
+	// Root-owned persistent children can be explicitly recovered after their parent
+	// exits. Nested workers retain only the existing in-process lifetime.
+	const recovery = HAS_PARENT
+		? undefined
+		: new RecoveryStore(
+				expandTilde(process.env.PI_CODING_AGENT_DIR || path.join(os.homedir(), ".pi", "agent")),
+				SUBAGENT_SESSION_DIR,
+			);
+	const childRecoveryIds = new Map<string, string>();
 	// Every Pi session can own a resident child, even though only the root may
 	// spawn background work. Track the parent's actual active/settled window at
 	// every depth so resumed-child announcements cannot race a late agent_wait.
@@ -580,6 +599,48 @@ export default function (pi: ExtensionAPI) {
 				.join("; ")
 		: "none";
 
+	if (recovery) {
+		pi.registerTool({
+			name: "agent_recover",
+			label: "Recover Agent Context",
+			description:
+				"List previous persistent subagent transcripts that can be resumed in the current project and Git branch. Read-only; never starts a child. To continue one, pass its recovery id to agent_spawn.resume_id with a fresh scoped prompt.",
+			promptSnippet: "Find recoverable persistent child contexts after a Pi restart",
+			promptGuidelines: [
+				"Check recoverable agents when resuming substantial implementation after a Pi restart, before assigning fresh exploration.",
+				"Reuse only when the role, project, Git branch, and task acceptance boundary still match. An old transcript is context, not proof that its changes still exist.",
+				"Do not resume a worker already active in another Pi process. Supply the fresh goal, changed requirements and current code state as the new spawn prompt.",
+			],
+			parameters: Type.Object({ limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })) }),
+			async execute(_callId, raw, _signal, _onUpdate, ctx) {
+				try {
+					const matches = recovery.list(ctx.cwd, (raw as { limit?: number }).limit ?? 20);
+					const text = matches.length
+						? matches
+								.map(
+									({ record, available }) =>
+										`${record.id} — ${record.profile} (${record.label}), ${available ? "recoverable" : "active elsewhere"}, ${record.updatedAt}, model ${record.model}`,
+								)
+								.join("\n")
+						: "No recorded persistent agent contexts for this project and Git branch.";
+					return {
+						content: [
+							{
+								type: "text",
+								text:
+									text +
+									"\nTo resume: agent_spawn({agent: <role>, resume_id: <id>, persistent: true, prompt: <fresh instructions>}).",
+							},
+						],
+						details: { count: matches.length },
+					};
+				} catch (error) {
+					return toErrorResult(error);
+				}
+			},
+		});
+	}
+
 	if (canDelegate(HAS_PARENT, ALLOWED_SUBAGENTS)) {
 		// ── agent_spawn ────────────────────────────────────
 		pi.registerTool({
@@ -594,6 +655,7 @@ export default function (pi: ExtensionAPI) {
 				"The profile already contains stable role instructions. Put only the concrete task, relevant paths/evidence, constraints, and desired result in prompt.",
 				"Nested delegation is explicit: a sub-agent can spawn only names listed in its allowed_subagents profile field.",
 				"If a child returns a question, answer that same resident child with agent_send instead of starting a replacement.",
+				"For substantial resumptions after a restart, use agent_recover first. A matching recovery id loads the saved child context; this prompt remains a fresh instruction. Never guess a recovery id or resume across project/branch/task boundaries.",
 				"The root chooses foreground/background per spawn. Several independent root spawns may run concurrently; background execution is root-only.",
 			],
 			parameters: SpawnParamsSchema,
@@ -661,6 +723,21 @@ export default function (pi: ExtensionAPI) {
 							: { error: resolved.error },
 						isError: true,
 					};
+				}
+
+				// Recovery is an explicit, root-only continuation. Claim the saved
+				// transcript before launching Pi, so a second session cannot write it.
+				let recoveryId: string | undefined;
+				let resumeSessionPath: string | undefined;
+				if (params.resume_id) {
+					if (!recovery) return toErrorResult("Only a root session can recover a persistent child.");
+					try {
+						const record = recovery.resume(params.resume_id, ctx.cwd, profile.name, resolved.model ?? "inherited");
+						recoveryId = record.id;
+						resumeSessionPath = record.sessionPath;
+					} catch (error) {
+						return toErrorResult(error);
+					}
 				}
 
 				const startedAt = Date.now();
@@ -762,8 +839,31 @@ export default function (pi: ExtensionAPI) {
 					appendSystemPrompt: runtimeProfile.prompt || undefined,
 					label,
 					sessionDir: SUBAGENT_SESSION_DIR,
+					resumeSessionPath,
 					// Resident after completion (idle, zero token) — explicit opt-in.
-					persistent: params.persistent,
+					persistent: params.persistent === true || Boolean(params.resume_id),
+					...(recovery && (params.persistent || params.resume_id)
+						? {
+								onSessionReady: (sessionPath: string) => {
+									if (recoveryId) {
+										if (path.resolve(sessionPath) !== path.resolve(resumeSessionPath ?? "")) {
+											throw new Error("Resumed Pi session did not return the expected transcript path");
+										}
+									} else {
+										const record = recovery.create({
+											cwd: ctx.cwd,
+											profile: profile.name,
+											label,
+											model: resolved.model ?? "inherited",
+											thinking: runtimeProfile.resolvedThinking ?? pi.getThinkingLevel(),
+											sessionPath,
+										});
+										recoveryId = record.id;
+									}
+									childRecoveryIds.set(agentId, recoveryId);
+								},
+							}
+						: {}),
 					// Identity for in-tree messaging: PI_SUBAGENT_AGENT_ID marks this
 					// process as a child (agent_send is registered on every instance).
 					env: {
@@ -844,6 +944,8 @@ export default function (pi: ExtensionAPI) {
 						void wakeCompletion("failed", generation)
 							.then(async (completion) => {
 								if (!(await registry.complete(agent, completion))) return;
+								const recordId = childRecoveryIds.get(agentId);
+								if (recordId) recovery?.suspend(recordId);
 								tree.remove(agentId, "failed");
 							})
 							.catch((error) => {
@@ -885,7 +987,11 @@ export default function (pi: ExtensionAPI) {
 						stop: async () => {
 							if (registry.lookup(agentId)) {
 								const stopped = await registry.stopAndRemove(agentId);
-								if (stopped) tree.remove(agentId, "stopped");
+								if (stopped) {
+									tree.remove(agentId, "stopped");
+									const recordId = childRecoveryIds.get(agentId);
+									if (recordId) recovery?.retire(recordId);
+								}
 							} else {
 								await agent.stop();
 							}
@@ -951,6 +1057,10 @@ export default function (pi: ExtensionAPI) {
 													: "stopped",
 										);
 										void registry.complete(child, completion);
+										if (completion.status !== "completed") {
+											const recordId = childRecoveryIds.get(child.agentId);
+											if (recordId) recovery?.suspend(recordId);
+										}
 									})
 									// Defensive: waitForCompletion normally resolves from child lifecycle events;
 									// if it ever rejects, clean up without notifying.
@@ -979,12 +1089,17 @@ export default function (pi: ExtensionAPI) {
 						},
 					});
 				} catch (err) {
+					if (recoveryId) recovery?.suspend(recoveryId);
 					return toErrorResult(err);
 				}
 
 				subtree.closeCard(); // from here on onUpdate cannot refresh the card
 				switch (outcome.kind) {
 					case "spawn-failed":
+						if (recoveryId) {
+							recovery?.suspend(recoveryId);
+							childRecoveryIds.delete(agentId);
+						}
 						// The isError return carries the failure to the LLM and the status
 						// line shows it to the user — no follow-up notification on top.
 						return spawnErrorResult(outcome, {
@@ -1015,7 +1130,7 @@ export default function (pi: ExtensionAPI) {
 							content: [
 								{
 									type: "text",
-									text: `Started background agent @${agent.agentId}. Completion arrives as a notification.`,
+									text: `${resumeSessionPath ? "Resumed" : "Started"} background agent @${agent.agentId}. Completion arrives as a notification.${recoveryId ? ` Recovery id: ${recoveryId} (list with agent_recover).` : ""}`,
 								},
 							],
 							details: {
@@ -1037,6 +1152,13 @@ export default function (pi: ExtensionAPI) {
 					}
 
 					case "finished": {
+						// Only idle successful persistent children stay attached. Failed,
+						// stopped or cancelled workers release their on-disk lease now.
+						if (recoveryId && !outcome.resident) {
+							if (outcome.stoppedByControl) recovery?.retire(recoveryId);
+							else recovery?.suspend(recoveryId);
+							childRecoveryIds.delete(agentId);
+						}
 						if (outcome.status === "completed" && agent.awaitingParent) {
 							const question = pendingQuestion ?? agent.pendingQuestion;
 							if (question) {
@@ -1403,7 +1525,11 @@ export default function (pi: ExtensionAPI) {
 			});
 			try {
 				const stopped = await registry.stopAndRemove(agentId);
-				if (stopped) tree.remove(agentId, "stopped");
+				if (stopped) {
+					tree.remove(agentId, "stopped");
+					const recordId = childRecoveryIds.get(agentId);
+					if (recordId) recovery?.retire(recordId);
+				}
 				if (!stopped) {
 					// Finished between lookup and removal (rare) — don't claim
 					// a stop that never happened.
@@ -1582,6 +1708,7 @@ ${registry.describeMessageTargets(target)}`
 		try {
 			await registry.shutdown();
 		} finally {
+			recovery?.suspendAll();
 			for (const bridge of controlBridges) bridge.cleanup();
 			controlBridges.clear();
 		}

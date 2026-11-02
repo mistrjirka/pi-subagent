@@ -245,6 +245,57 @@ describe("AgentProcess — spawnAndSend", () => {
 		]);
 	});
 
+	it("loads an existing transcript and sends a fresh prompt without opening a new session", async () => {
+		let ready: string | undefined;
+		const old = "/tmp/stored-subagent.jsonl";
+		const { agent, fake } = makeAgent({
+			cwd: "/tmp",
+			model: "openai/gpt-6.1-sol",
+			resumeSessionPath: old,
+			sessionDir: "/tmp/unused-sessions",
+			onSessionReady: (sessionPath) => {
+				ready = sessionPath;
+			},
+		});
+		fake.sessionFile = old;
+		assert.ok(fake.args.includes("--session"));
+		assert.equal(fake.args[fake.args.indexOf("--session") + 1], old);
+		assert.ok(!fake.args.includes("--session-dir"));
+		const result = await agent.spawnAndSend("Continue the accepted task; check current files first.");
+		assert.deepEqual(result, { ok: true });
+		assert.equal(ready, old);
+		assert.deepEqual(
+			fake.commands.slice(0, 3).map((x) => x.type),
+			["get_state", "get_messages", "prompt"],
+		);
+		assert.equal(fake.commands[2]?.message, "Continue the accepted task; check current files first.");
+	});
+
+	it("refuses wrong restored context before delivering a task", async () => {
+		const { agent, fake } = makeAgent({ cwd: "/tmp", resumeSessionPath: "/tmp/expected.jsonl" });
+		fake.sessionFile = "/tmp/different.jsonl";
+		const result = await agent.spawnAndSend("do not execute");
+		assert.equal(result.ok, false);
+		assert.match(result.ok ? "" : result.error, /No task was sent/);
+		assert.deepEqual(
+			fake.commands.map((x) => x.type),
+			["get_state"],
+		);
+	});
+
+	it("fails closed when persisted session metadata cannot be saved", async () => {
+		const { agent } = makeAgent({
+			cwd: "/tmp",
+			onSessionReady: () => {
+				throw new Error("metadata store failed");
+			},
+		});
+		const result = await agent.spawnAndSend("task");
+		assert.equal(result.ok, false);
+		assert.match(result.ok ? "" : result.error, /Could not save child recovery state/);
+		assert.equal(agent.status, "failed");
+	});
+
 	it("passes thinking level through as --thinking", () => {
 		const { fake } = makeAgent({ cwd: "/tmp", model: "google/gemini-x", label: "explore", thinking: "high" });
 		assert.deepEqual(fake.args, ["--model", "google/gemini-x", "--thinking", "high", "--name", "explore"]);

@@ -10,7 +10,7 @@ function keys(schema: TSchema): string[] {
 describe("buildSpawnParamsSchema", () => {
 	it("root exposes only role/task/lifecycle controls", () => {
 		const k = keys(buildSpawnParamsSchema(false));
-		assert.deepEqual(k.sort(), ["agent", "label", "persistent", "prompt", "run_in_background"].sort());
+		assert.deepEqual(k.sort(), ["agent", "label", "persistent", "prompt", "resume_id", "run_in_background"].sort());
 		for (const forbidden of ["model", "thinking", "tools", "timeoutMs", "max_turns", "toolBudget"]) {
 			assert.ok(!k.includes(forbidden), `model-facing spawn must not expose ${forbidden}`);
 		}
@@ -29,6 +29,7 @@ describe("buildSpawnParamsSchema", () => {
 	it("nested agents cannot request background execution", () => {
 		const k = keys(buildSpawnParamsSchema(true));
 		assert.ok(!k.includes("run_in_background"));
+		assert.ok(!k.includes("resume_id"));
 		assert.deepEqual(k.sort(), ["agent", "label", "persistent", "prompt"].sort());
 	});
 });

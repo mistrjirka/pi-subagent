@@ -15,6 +15,7 @@
  * explicitly stops it, or the hosting Pi process exits.
  */
 
+import * as path from "node:path";
 import type { AgentTreeEvent } from "./event-interpret.js";
 import { type AgentActivity, type AgentEvent, interpretEvent } from "./event-interpret.js";
 import type { AgentMessage, AgentQuestion, RpcCommand, RpcEvent } from "./protocol.js";
@@ -63,6 +64,10 @@ export interface AgentProcessOptions {
 	agentId: string;
 	/** Custom session storage dir (--session-dir) — keeps sub-agent sessions out of `pi -r`. */
 	sessionDir?: string;
+	/** Existing session file to load instead of starting with a blank context. */
+	resumeSessionPath?: string;
+	/** Called when Pi confirms its saved session path (used for durable recovery). */
+	onSessionReady?: (sessionPath: string, sessionId?: string) => void;
 	/** Streamed assistant text deltas (rpc message_update/text_delta) — for live tool-card output. */
 	onDelta?: (delta: string) => void;
 	/** Thinking/tool activity transitions (no text delta involved) — for live tool-card rows. */
@@ -156,14 +161,17 @@ export class AgentProcess {
 		this.onTreeEvent = options.onTreeEvent;
 		this.onIdle = options.onIdle;
 		this.onStream = options.onStream;
+		this.onSessionReady = options.onSessionReady;
+		this.resumeSessionPath = options.resumeSessionPath;
 
 		const args: string[] = [];
 		if (options.model) args.push("--model", options.model);
 		if (options.thinking) args.push("--thinking", options.thinking);
 		if (options.appendSystemPrompt) args.push("--append-system-prompt", options.appendSystemPrompt);
+		if (options.resumeSessionPath) args.push("--session", options.resumeSessionPath);
 		// Label names the session (--name, capped at 80 chars).
 		args.push("--name", options.label.slice(0, 80));
-		if (options.sessionDir) args.push("--session-dir", options.sessionDir);
+		if (options.sessionDir && !options.resumeSessionPath) args.push("--session-dir", options.sessionDir);
 
 		const clientOptions: RpcClientOptions = {
 			args,
@@ -185,6 +193,22 @@ export class AgentProcess {
 
 	/** Spawn + send the prompt; resolves once the prompt preflight succeeded. */
 	async spawnAndSend(prompt: string): Promise<{ ok: true } | { ok: false; error: string }> {
+		// An old Pi context must be loaded and inspected before sending any new
+		// prompt. Otherwise an incorrect --session path could start fresh work.
+		if (this.resumeSessionPath) {
+			const state = await this.sendData<{ sessionFile?: string }>({ type: "get_state" });
+			if (!state?.sessionFile || path.resolve(state.sessionFile) !== path.resolve(this.resumeSessionPath)) {
+				this.status = "failed";
+				return { ok: false, error: "Pi did not load the requested recovery session. No task was sent." };
+			}
+			try {
+				const messages = await this.getMessages();
+				if (!messages.length) throw new Error("Saved session has no conversation history");
+			} catch {
+				this.status = "failed";
+				return { ok: false, error: "Saved session history could not be verified. No task was sent." };
+			}
+		}
 		const response = await this.client
 			.sendCommand({ type: "prompt", message: prompt }, STARTUP_PROMPT_TIMEOUT_MS)
 			.catch((err: Error) => ({
@@ -204,6 +228,17 @@ export class AgentProcess {
 		if (data) {
 			this.sessionPath = data.sessionFile;
 			this.sessionId = data.sessionId;
+		}
+		if (this.sessionPath && this.onSessionReady) {
+			try {
+				this.onSessionReady(this.sessionPath, this.sessionId);
+			} catch (error) {
+				this.status = "failed";
+				return { ok: false, error: `Could not save child recovery state: ${String(error)}` };
+			}
+		} else if (this.onSessionReady) {
+			this.status = "failed";
+			return { ok: false, error: "Pi did not provide a session path; persistent worker cannot be recovered." };
 		}
 
 		if (this.closing) return { ok: false, error: "Child stopped during startup." };
@@ -447,6 +482,8 @@ export class AgentProcess {
 	private readonly onTreeEvent: ((event: AgentTreeEvent) => void) | undefined;
 	private readonly onIdle: ((outcome: "completed" | "failed", generation: number) => void) | undefined;
 	private readonly onStream: ((event: AgentEvent) => void) | undefined;
+	private readonly onSessionReady: ((sessionPath: string, sessionId?: string) => void) | undefined;
+	private readonly resumeSessionPath: string | undefined;
 
 	private onEvent(event: RpcEvent): void {
 		// Raw protocol shapes are interpreted in event-interpret.ts — the only

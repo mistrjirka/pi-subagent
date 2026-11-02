@@ -271,8 +271,52 @@ Parameters:
 - `label` — optional UI label; defaults to the profile name.
 - `persistent` — keep the same child context resident after completion.
 - `run_in_background` — root-only execution choice. Omitted or `true` detaches and returns an agent id; `false` waits in foreground. Nested spawns are always foreground.
+- `resume_id` — root-only recovery id returned by `agent_recover` for the same project, branch, role and model. Requires a **new prompt** and keeps the restored child persistent.
 
 Nested agents do not get `run_in_background`; their parent waits for them directly.
+
+### `agent_recover` (root-only, after a restart)
+
+Persistent children now leave a small, private recovery record under
+`~/.pi/agent/subagent-recovery/` (or the configured Pi agent directory).
+It stores the project path, Git branch, profile, model, label and **existing**
+child session path. The conversation stays in `subagent-sessions/*.jsonl`.
+No prompts, credentials or transcripts are copied into the recovery record.
+Only workers started with `persistent: true` get recovery records.
+
+If Pi quits or restarts, the old worker process exits but its session survives.
+When you reopen the **same project and branch**, list recorded sessions:
+
+```json
+{}
+```
+
+Call the `agent_recover` tool with those parameters. It returns the recovery
+ids and whether each worker is recoverable or still owned by a live Pi process.
+To continue a prior implementation context, explicitly spawn a *new process*
+from its saved transcript, with a fresh task prompt:
+
+```json
+{
+  "agent": "implementer",
+  "resume_id": "<id returned by agent_recover>",
+  "prompt": "Continue this same assignment. Read the current intent and plan; recheck the working tree and decisions before editing.",
+  "persistent": true
+}
+```
+
+The recovered process loads the earlier Pi conversation before accepting the
+new prompt. The extension verifies the loaded session path and that prior
+messages exist **before** sending any new task. A missing/invalid transcript,
+changed project, branch, profile or model, or an active owner prevents recovery.
+A deliberate `agent_stop` permanently retires the recovery id. A dead parent
+leaves a reclaimable lease, and normal session shutdown releases its lease.
+
+Recovery never resumes unfinished edits or starts a model automatically.
+A parent must decide that the old task boundary still applies and include any
+new requirements. Existing contexts created **before this version** have no
+recovery records. Reuse saves exploration context, but may trigger compaction
+for large histories. Do not use one recovery id concurrently in two Pi sessions.
 
 ### `agent_wait`
 

@@ -527,10 +527,11 @@ export default function (pi: ExtensionAPI) {
 								customType: "subagent-supervision",
 								content:
 									`Subagent @${agent.agentId} has been running unsupervised for about ${minutes} minute${minutes === 1 ? "" : "s"}. ` +
-									`Latest activity: ${activity}. Check whether it is making sensible progress. ` +
-									"SUPERVISION CHECK REQUIRED: review the transcript before waiting again: is the child making real progress on its task? " +
-									"If it is, continue supervision with agent_wait (normally a 150-second window). " +
-									"If it looks stuck, is repeating itself, or has wandered off the task, steer it with agent_send, inspect it, or stop it. Do not use shell sleep or polling." +
+									`Latest activity: ${activity}. ` +
+									"SUPERVISION CHECK REQUIRED: compare new evidence with the assigned scope and last correction. Is the child making real progress? " +
+									"If progress remains aligned, continue with agent_wait (normally a 150-second window) without reassurance messages, document updates, or repeated audits. " +
+									"Inspect or steer with agent_send for a concrete blocker, scope drift, repeated failure, or necessary coordination. Stop the child when needed. " +
+									"A timeout or long-running command alone is not a stall. Use agent_wait for subagents rather than shell polling. Ordinary external processes may use process/job waits." +
 									`\n\nRecent transcript (${transcript.source}):\n${transcript.text}`,
 								display: true,
 								details: {
@@ -1277,8 +1278,8 @@ export default function (pi: ExtensionAPI) {
 			"Wait for a direct child to settle, fail/stop, ask its parent a question, or receive any child message to @parent. Child messages wake the wait immediately. timeout_seconds limits this call; expiry shows newest progress. Neither stops the child. Default 180 seconds.",
 		promptSnippet: "Wait for a background or resumed child to settle",
 		promptGuidelines: [
-			"Use agent_wait when a background child's result becomes the next dependency instead of polling shell/status output.",
-			"For supervision, a 150-second wait window is a useful cadence. On timeout, agent_wait prioritizes newest progress (bounded and not repeated) while agent_inspect pages through older unread history. Inspect older messages only when needed to understand a problem or decision. If the child is making progress, wait again. The two tools avoid repeating already shown transcript entries.",
+			"Use agent_wait when a background child's result becomes the next dependency instead of shell sleep or polling. This applies to subagents, not ordinary external processes with process/job wait mechanisms. Use completion results already delivered rather than fetching them again.",
+			"For supervision, keep a 150-second wait window. Compare new evidence with the assigned scope and last correction. On timeout, agent_wait shows newest unread progress while agent_inspect pages through older unread history. Inspect older messages only to resolve a problem or decision. If progress remains aligned, wait again without reassurance messages, document updates, or repeated audits. The two tools avoid repeating already shown transcript entries.",
 			"If timeout_seconds is omitted, agent_wait uses a 180-second supervision window. timeout_seconds: 0 returns an immediate live snapshot.",
 			"If agent_wait returns an ask_parent question, answer that same child with agent_send; call agent_wait again only after the answer when you need the resumed result.",
 			"If agent_wait returns an ordinary message from any child, handle it immediately. The child remains running. Reply with agent_send if needed, then resume supervision.",
@@ -1332,8 +1333,8 @@ export default function (pi: ExtensionAPI) {
 							type: "text",
 							text:
 								`${window}; ${atId(agentId)} is still ${reportedAgentState(live)}. Latest activity: ${activitySummary(activity)}. ` +
-								"The wait window did not stop the agent. SUPERVISION CHECK REQUIRED: use the latest activity and unread transcript below to judge whether the child is making real progress before waiting again. " +
-								"If it is, wait again; if it looks stuck, is repeating itself, or has wandered off the task, steer it with agent_send, inspect it, or stop it." +
+								"The wait window did not stop the agent. SUPERVISION CHECK REQUIRED: compare new evidence with the assigned scope and last correction. A timeout or long-running command alone is not a stall. " +
+								"If progress remains aligned, wait again without reassurance messages, document updates, or repeated audits. Inspect or steer with agent_send for a concrete blocker, scope drift, repeated failure, or necessary coordination. Stop the child when needed." +
 								`\n\nNewest progress (${transcript.returnedMessages} messages, newest first; ${transcript.source}):\n${transcript.text}\n\nFor older unread history, use agent_inspect when needed.`,
 						},
 					],

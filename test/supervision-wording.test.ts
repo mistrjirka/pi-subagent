@@ -24,8 +24,20 @@ describe("supervision wording stays plain", () => {
 			["README.md", readmeSource],
 		] as const) {
 			assert.ok(source.includes("making real progress"), `${name} lost the progress question`);
-			assert.ok(source.includes("repeating itself"), `${name} lost the repeating signal`);
-			assert.ok(source.includes("wandered off the task"), `${name} lost the off-task signal`);
+			assert.ok(source.includes("assigned scope and last correction"), `${name} lost the scope comparison`);
+			assert.ok(source.includes("repeated failure"), `${name} lost the repeating signal`);
+			assert.ok(source.includes("scope drift"), `${name} lost the off-task signal`);
+			assert.ok(source.includes("concrete blocker"), `${name} lost the blocker signal`);
+			assert.ok(
+				source.includes("without reassurance messages, document updates, or repeated audits"),
+				`${name} lost the low-overhead aligned path`,
+			);
+			assert.ok(
+				source.includes("A timeout or long-running command alone is not a stall"),
+				`${name} treats a timeout as a failure`,
+			);
+			assert.ok(source.includes("Use completion results already delivered"), `${name} lost completion reuse`);
+			assert.ok(source.includes("process/job wait"), `${name} lost ordinary process waiting`);
 			assert.ok(source.includes("steer"), `${name} lost the steer action`);
 			assert.ok(source.includes("inspect"), `${name} lost the inspect action`);
 			assert.ok(source.includes("stop"), `${name} lost the stop action`);

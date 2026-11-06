@@ -332,11 +332,11 @@ With no explicit timeout, `agent_wait` uses a **180-second supervision window**.
 { "agent_id": "@max", "timeout_seconds": 150 }
 ```
 
-When the 150-second window expires, the result says the child is still running and includes its latest activity plus an unread transcript page. `agent_wait` and `agent_inspect` share one append-ordered Pi session-entry cursor, so transcript messages already returned by either tool are not repeated. If the page says more unread messages remain, call `agent_inspect` immediately to drain the next page; otherwise judge whether the child is making real progress. If it is, another wait is fine; if it looks stuck, is repeating itself, or has wandered off the task, steer it with `agent_send`, inspect it, or stop it. `timeout_seconds: 0` is an immediate status snapshot. Omitting the field uses the 180-second default.
+When the 150-second window expires, the result says the child is still running and includes its latest activity plus an unread transcript page. `agent_wait` and `agent_inspect` share one append-ordered Pi session-entry cursor, so transcript messages already returned by either tool are not repeated. Compare new evidence with the assigned scope and last correction to judge whether the child is making real progress. Read older history with `agent_inspect` only to resolve a problem or decision, not merely to drain unread pages. If progress remains aligned, wait again without reassurance messages, document updates, or repeated audits. Inspect or steer with `agent_send` for a concrete blocker, scope drift, repeated failure, or necessary coordination. Stop the child when needed. A timeout or long-running command alone is not a stall. Use completion results already delivered rather than fetching them again. `timeout_seconds: 0` is an immediate status snapshot. Omitting the field uses the 180-second default.
 
 For root background/resumed children, the runtime also has a fallback supervision reminder: when the root parent ends its turn with a child still running, it starts a 3-minute unsupervised clock. If the parent has not resumed supervision before that window expires, the runtime injects a follow-up telling the parent to check the child and includes the latest activity. A new parent turn pauses the clock; if that turn ends with the child still running, a fresh 3-minute window begins. This is **not** a task timeout and never cancels the child.
 
-Use `agent_wait` instead of shell `sleep`/poll loops.
+Use `agent_wait` instead of shell `sleep`/poll loops when waiting for subagents. Ordinary external processes may use their process/job wait mechanisms.
 
 ### `agent_inspect`
 

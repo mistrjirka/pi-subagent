@@ -362,6 +362,10 @@ describe("AgentRegistry — explicit wait", () => {
 
 		await registry.complete(agent, completion({ output: "already done" }));
 		assert.deepEqual(notified, [], "completion is deferred while the parent turn is active");
+		// Reproduce the old race: turn_end queued a steer before the next turn's
+		// agent_wait consumed the same completion, which caused a late duplicate.
+		registry.parentReachedBoundary();
+		assert.deepEqual(notified, [], "turn_end must not enqueue an unremovable duplicate");
 		assert.equal((await registry.waitForSettlement("a1"))?.completion.output, "already done");
 		registry.parentBecameIdle();
 

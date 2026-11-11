@@ -288,6 +288,46 @@ describe("interpretEvent — extension_ui_request (in-tree messages)", () => {
 		);
 	});
 
+	it("preserves original send time and kind without losing legacy compatibility", () => {
+		const base = { type: "extension_ui_request", method: "setStatus", statusKey: MSG_STATUS_KEY };
+		assert.deepEqual(
+			interpretEvent({
+				...base,
+				statusText: JSON.stringify({
+					to: "@parent",
+					from: "faye",
+					message: "fix needed",
+					sentAt: 1794406899000,
+					kind: "diagnostic",
+				}),
+			}),
+			[
+				{
+					type: "agent_msg",
+					message: {
+						to: "@parent",
+						from: "faye",
+						message: "fix needed",
+						sentAt: 1794406899000,
+						kind: "diagnostic",
+					},
+				},
+			],
+		);
+		assert.deepEqual(
+			interpretEvent({
+				...base,
+				statusText: JSON.stringify({
+					to: "@parent",
+					message: "plain",
+					sentAt: -1,
+					kind: "unknown",
+				}),
+			}),
+			[{ type: "agent_msg", message: { to: "@parent", from: "", message: "plain" } }],
+		);
+	});
+
 	it("defaults from to empty when omitted (sender is the root session)", () => {
 		const [ev] = interpretEvent({
 			type: "extension_ui_request",

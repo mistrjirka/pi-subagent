@@ -4,7 +4,28 @@
 
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { formatFrom, parseLine, routeMessage, serializeCommand } from "../protocol.js";
+import { formatFrom, formatParentMessage, parseLine, routeMessage, serializeCommand } from "../protocol.js";
+
+describe("formatParentMessage", () => {
+	it("retains source time and diagnostic intent for an asynchronous message", () => {
+		assert.equal(
+			formatParentMessage({
+				to: "@parent",
+				from: "faye",
+				message: "Current DTOs compiled",
+				sentAt: Date.UTC(2026, 10, 11, 14, 21, 39),
+				kind: "diagnostic",
+			}),
+			"[from faye] [sent 2026-11-11T14:21:39.000Z] [diagnostic] Current DTOs compiled",
+		);
+	});
+	it("ignores invalid sender timestamps instead of crashing the parent", () => {
+		assert.equal(formatParentMessage({ to: "@parent", from: "a", message: "ok", sentAt: 9e15 }), "[from a] ok");
+	});
+	it("preserves legacy message formatting without metadata", () => {
+		assert.equal(formatParentMessage({ to: "@parent", from: "asa", message: "ready" }), "[from asa] ready");
+	});
+});
 
 describe("serializeCommand", () => {
 	it("serializes a prompt command as a single LF-terminated line", () => {

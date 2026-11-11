@@ -9,7 +9,7 @@ const { Agent } = await import(corePackage);
 const { createAssistantMessageEventStream } = await import(aiPackage);
 
 for (const consume of [false, true]) {
-	test(`real agent loop: ${consume ? "inspection prevents replay" : "completion reaches the next request before the answer"}`, async () => {
+	test(`real agent loop: ${consume ? "inspection prevents replay" : "unconsumed completion wakes the settled parent"}`, async () => {
 		let requests = 0;
 		let sent = 0;
 		const seen: string[] = [];
@@ -99,12 +99,15 @@ for (const consume of [false, true]) {
 			},
 		});
 		parent.subscribe((event: { type: string }) => {
-			if (event.type === "turn_end") registry.parentReachedBoundary();
+			if (event.type === "turn_end") {
+				registry.parentReachedBoundary();
+				assert.equal(sent, 0, "active turn cannot prequeue a stale completion");
+			}
 		});
 		await parent.prompt("start");
 		registry.parentBecameIdle();
 		assert.equal(requests, 2);
 		assert.equal(sent, consume ? 0 : 1);
-		assert.equal(seen[1].includes("UNIQUE_CHILD_REPORT"), !consume);
+		assert.equal(seen[1].includes("UNIQUE_CHILD_REPORT"), false);
 	});
 }

@@ -245,7 +245,11 @@ export function interpretEvent(raw: RpcEvent): AgentEvent[] {
 		if (raw.method === "setStatus" && raw.statusKey === MSG_STATUS_KEY) {
 			try {
 				const parsed = JSON.parse(raw.statusText) as {
-					to?: unknown; from?: unknown; message?: unknown; sentAt?: unknown; kind?: unknown;
+					to?: unknown;
+					from?: unknown;
+					message?: unknown;
+					sentAt?: unknown;
+					kind?: unknown;
 				};
 				if (typeof parsed.to === "string" && typeof parsed.message === "string") {
 					const kind = parsed.kind;
@@ -257,8 +261,12 @@ export function interpretEvent(raw: RpcEvent): AgentEvent[] {
 								to: parsed.to,
 								from: typeof parsed.from === "string" ? parsed.from : "",
 								message: parsed.message,
-								...(typeof parsed.sentAt === "number" && Number.isSafeInteger(parsed.sentAt) && parsed.sentAt > 0 && parsed.sentAt <= 8_640_000_000_000_000
-									? { sentAt: parsed.sentAt } : {}),
+								...(typeof parsed.sentAt === "number" &&
+								Number.isSafeInteger(parsed.sentAt) &&
+								parsed.sentAt > 0 &&
+								parsed.sentAt <= 8_640_000_000_000_000
+									? { sentAt: parsed.sentAt }
+									: {}),
 								...(validKind ? { kind } : {}),
 							},
 						},

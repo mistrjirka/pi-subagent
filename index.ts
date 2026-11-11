@@ -429,7 +429,12 @@ async function handleMessage(
 				customType: "subagent-message",
 				content: formatParentMessage(msg),
 				display: true,
-				details: { from: msg.from, message: msg.message, ...(msg.sentAt ? { sentAt: msg.sentAt } : {}), ...(msg.kind ? { kind: msg.kind } : {}) },
+				details: {
+					from: msg.from,
+					message: msg.message,
+					...(msg.sentAt ? { sentAt: msg.sentAt } : {}),
+					...(msg.kind ? { kind: msg.kind } : {}),
+				},
 			},
 			{ deliverAs: "steer", triggerTurn: true },
 		);

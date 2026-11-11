@@ -9,7 +9,13 @@ import { formatFrom, formatParentMessage, parseLine, routeMessage, serializeComm
 describe("formatParentMessage", () => {
 	it("retains source time and diagnostic intent for an asynchronous message", () => {
 		assert.equal(
-			formatParentMessage({ to: "@parent", from: "faye", message: "Current DTOs compiled", sentAt: Date.UTC(2026, 10, 11, 14, 21, 39), kind: "diagnostic" }),
+			formatParentMessage({
+				to: "@parent",
+				from: "faye",
+				message: "Current DTOs compiled",
+				sentAt: Date.UTC(2026, 10, 11, 14, 21, 39),
+				kind: "diagnostic",
+			}),
 			"[from faye] [sent 2026-11-11T14:21:39.000Z] [diagnostic] Current DTOs compiled",
 		);
 	});

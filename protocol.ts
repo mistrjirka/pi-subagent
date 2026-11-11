@@ -147,7 +147,10 @@ export function formatFrom(from: string): string {
 /** Preserve the origin of an asynchronous child update in the parent's model context. */
 export function formatParentMessage(message: AgentMessage): string {
 	const timestamp =
-		typeof message.sentAt === "number" && Number.isSafeInteger(message.sentAt) && message.sentAt > 0 && message.sentAt <= 8_640_000_000_000_000
+		typeof message.sentAt === "number" &&
+		Number.isSafeInteger(message.sentAt) &&
+		message.sentAt > 0 &&
+		message.sentAt <= 8_640_000_000_000_000
 			? `[sent ${new Date(message.sentAt).toISOString()}] `
 			: "";
 	const intent = message.kind && message.kind !== "instruction" ? `[${message.kind}] ` : "";

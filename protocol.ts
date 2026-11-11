@@ -104,6 +104,10 @@ export interface AgentMessage {
 	from: string;
 	/** Message text (LLM-visible content). */
 	message: string;
+	/** Original send time, not the later time at which Pi exposes it to the parent model. */
+	sentAt?: number;
+	/** Sender intent. Metadata only: never suppresses delivery or wake-ups. */
+	kind?: "instruction" | "diagnostic" | "urgent" | "answer";
 }
 
 /** Routing decision for one message at one process. */
@@ -138,6 +142,16 @@ export function routeMessage(message: AgentMessage, childIds: readonly string[],
 /** LLM-visible sender prefix: "[from max] " (root session: ""). */
 export function formatFrom(from: string): string {
 	return from ? `[from ${from}] ` : "";
+}
+
+/** Preserve the origin of an asynchronous child update in the parent's model context. */
+export function formatParentMessage(message: AgentMessage): string {
+	const timestamp =
+		typeof message.sentAt === "number" && Number.isSafeInteger(message.sentAt) && message.sentAt > 0 && message.sentAt <= 8_640_000_000_000_000
+			? `[sent ${new Date(message.sentAt).toISOString()}] `
+			: "";
+	const intent = message.kind && message.kind !== "instruction" ? `[${message.kind}] ` : "";
+	return `${formatFrom(message.from)}${timestamp}${intent}${message.message}`;
 }
 
 // ─── Pure helpers ──────────────────────────────────────────

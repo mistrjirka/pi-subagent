@@ -53,7 +53,7 @@ import {
 	parseAllowedSubagentsEnv,
 	resolveAgentProfile,
 } from "./profiles.js";
-import { type AgentMessage, type AgentQuestion, formatFrom } from "./protocol.js";
+import { type AgentMessage, type AgentQuestion, formatFrom, formatParentMessage } from "./protocol.js";
 import { RecoveryStore } from "./recovery.js";
 import {
 	AgentRegistry,
@@ -427,9 +427,9 @@ async function handleMessage(
 		pi.sendMessage(
 			{
 				customType: "subagent-message",
-				content: `${formatFrom(msg.from)}${msg.message}`,
+				content: formatParentMessage(msg),
 				display: true,
-				details: { from: msg.from, message: msg.message },
+				details: { from: msg.from, message: msg.message, ...(msg.sentAt ? { sentAt: msg.sentAt } : {}), ...(msg.kind ? { kind: msg.kind } : {}) },
 			},
 			{ deliverAs: "steer", triggerTurn: true },
 		);
@@ -1278,7 +1278,7 @@ export default function (pi: ExtensionAPI) {
 			"Use agent_wait when a background child's result becomes the next dependency instead of shell sleep or polling. This applies to subagents, not ordinary external processes with process/job wait mechanisms. Use completion results already delivered rather than fetching them again.",
 			"For supervision, keep a 150-second wait window. Compare new evidence with the assigned scope and last correction. On timeout, agent_wait shows newest unread progress while agent_inspect pages through older unread history. Inspect older messages only to resolve a problem or decision. If progress remains aligned, wait again without reassurance messages, document updates, or repeated audits. The two tools avoid repeating already shown transcript entries.",
 			"If timeout_seconds is omitted, agent_wait uses a 180-second supervision window. timeout_seconds: 0 returns an immediate live snapshot.",
-			"If agent_wait returns an ask_parent question, answer that same child with agent_send; call agent_wait again only after the answer when you need the resumed result.",
+			"If agent_wait returns an ask_parent question, answer that same child with agent_send kind=answer. Wait again only when its resumed result is needed.",
 			"If agent_wait returns an ordinary message from any child, handle it immediately. The child remains running. Reply with agent_send if needed, then resume supervision.",
 		],
 		parameters: WaitParamsSchema,
@@ -1353,7 +1353,7 @@ export default function (pi: ExtensionAPI) {
 					content: [
 						{
 							type: "text",
-							text: `Message from ${atId(message.from)} during agent_wait for ${atId(agentId)}:\n${formatFrom(message.from)}${message.message}\n\nThe wait ended immediately; the child is still running. Reply with agent_send if needed, then resume supervision.`,
+							text: `Message from ${atId(message.from)} during agent_wait for ${atId(agentId)}:\n${formatParentMessage(message)}\n\nThe wait ended immediately; the child is still running. Reply with agent_send if needed, then resume supervision.`,
 						},
 					],
 					details: { agentId, state: "message", from: message.from, message: message.message, wokenByMessage: true },
@@ -1576,6 +1576,8 @@ export default function (pi: ExtensionAPI) {
 		promptGuidelines: [
 			"Send follow-up instructions to a running or idle agent with agent_send; its context is intact.",
 			"When a child is waiting after ask_parent, answer that exact child id with agent_send kind=answer. Ordinary instructions do not wake a waiting child.",
+			"The backend or contract owner chooses routine DTO/type names using existing code conventions; consumers read the current generated/source contract. Do not prescribe or repeatedly rename details without a verified incompatibility or a user requirement.",
+			"Child messages are asynchronous snapshots, not guaranteed current state. Before correcting a child, compare the message's sent time with newer updates and the current affected files. Intervene for genuine blockers, risks, ownership conflicts, or verified defects, not reassurance or stale progress.",
 			"Do not echo a child’s tool output or transient pi-lens warning. Only forward a current, verified, still-actionable diagnostic using kind=diagnostic with concrete evidence. Identical findings to the same child are deduplicated for ten minutes.",
 			"Use kind=urgent for safety violations, destructive scope mistakes, or immediate cross-owner conflicts. Urgent steering is never deduplicated.",
 		],
@@ -1637,7 +1639,7 @@ export default function (pi: ExtensionAPI) {
 			const r = await handleMessage(
 				pi,
 				registry,
-				{ to: target, from: MY_AGENT_ID, message },
+				{ to: target, from: MY_AGENT_ID, message, sentAt: Date.now(), ...(params.kind ? { kind: params.kind } : {}) },
 				true,
 				params.kind === "answer",
 			);

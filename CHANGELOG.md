@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.5.11 — reliable parent questions and queued completions
+
+- Deliver `ask_parent` questions as priority steering messages, so they reach the parent model at its next safe boundary instead of waiting for the whole run to settle.
+- Suppress duplicate question delivery when `agent_wait` also observes the question. Ordinary completion notifications remain deferred until the parent settles.
+- Require explicit `agent_send kind=answer` to wake a child blocked on a material parent decision. Normal instructions cannot silently become answers.
+- Include the pending question and context in the live control status for PiTTy.
+- Includes prior unreleased v0.5.10 fixes for duplicate late completion notifications.
+
+Validation: 354 tests and TypeScript passed on the current branch.
+
 ## 0.5.10 — restart-safe persistent worker recovery
 
 - Save private recovery metadata for persistent root-owned workers and keep transcripts in their original Pi session files.

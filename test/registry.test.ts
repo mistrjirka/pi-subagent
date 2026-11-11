@@ -362,6 +362,10 @@ describe("AgentRegistry — explicit wait", () => {
 
 		await registry.complete(agent, completion({ output: "already done" }));
 		assert.deepEqual(notified, [], "completion is deferred while the parent turn is active");
+		// Reproduce the old race: turn_end queued a steer before the next turn's
+		// agent_wait consumed the same completion, which caused a late duplicate.
+		registry.parentReachedBoundary();
+		assert.deepEqual(notified, [], "turn_end must not enqueue an unremovable duplicate");
 		assert.equal((await registry.waitForSettlement("a1"))?.completion.output, "already done");
 		registry.parentBecameIdle();
 
@@ -926,7 +930,7 @@ describe("revision and shutdown ordering regressions", () => {
 });
 
 describe("completion delivery boundaries", () => {
-	it("delivers unread completion at the next tool boundary, once", async () => {
+	it("delivers unread completion after the parent settles, once", async () => {
 		const notified: string[] = [];
 		const registry = new AgentRegistry({
 			notify: (agent) => {
@@ -939,7 +943,7 @@ describe("completion delivery boundaries", () => {
 		await registry.complete(agent, completion({ output: "report" }));
 		assert.deepEqual(notified, []);
 		registry.parentReachedBoundary();
-		assert.deepEqual(notified, ["una"]);
+		assert.deepEqual(notified, [], "an active turn cannot inject a stale duplicate");
 		registry.parentBecameIdle();
 		assert.deepEqual(notified, ["una"]);
 	});
@@ -976,6 +980,8 @@ describe("completion delivery boundaries", () => {
 		await registry.complete(agent, completion());
 		registry.peekSettlement("una");
 		registry.parentReachedBoundary();
+		assert.equal(announced, 0);
+		registry.parentBecameIdle();
 		assert.equal(announced, 1);
 	});
 
@@ -995,7 +1001,7 @@ describe("completion delivery boundaries", () => {
 		assert.equal(announced, 0);
 		await registry.deliver("una", "next task");
 		await registry.complete(agent, completion({ output: "new result" }));
-		registry.parentReachedBoundary();
+		registry.parentBecameIdle();
 		assert.equal(announced, 1);
 	});
 });
@@ -1015,6 +1021,6 @@ it("a stale asynchronous inspection cannot acknowledge a newer settlement", asyn
 	await registry.deliver("una", "new task");
 	await registry.complete(agent, completion({ output: "new" }));
 	assert.equal(registry.consumeSettlement("una", old), undefined);
-	registry.parentReachedBoundary();
+	registry.parentBecameIdle();
 	assert.equal(announced, 1);
 });

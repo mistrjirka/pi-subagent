@@ -567,16 +567,9 @@ export default function (pi: ExtensionAPI) {
 	// spawn background work. Track the parent's actual active/settled window at
 	// every depth so resumed-child announcements cannot race a late agent_wait.
 	pi.on("agent_start", () => registry.parentBecameActive());
-	pi.on("turn_end", (event) => {
-		if (
-			event.message.role === "assistant" &&
-			event.message.stopReason !== "error" &&
-			event.message.stopReason !== "aborted"
-		)
-			registry.parentReachedBoundary();
-	});
-	// agent_end can be followed by automatic retry/compaction. Keep an idle fallback
-	// for results arriving after the last turn boundary.
+	// Do not announce at turn_end: Pi queues the steer immediately, but a later
+	// agent_wait can consume the same result before that steer reaches the model.
+	// Only announce unconsumed completions once the parent is idle.
 	pi.on("agent_settled", () => registry.parentBecameIdle());
 
 	// Inbound messages (a child addresses @parent, forwards a sibling's

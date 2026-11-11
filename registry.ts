@@ -289,8 +289,11 @@ export class AgentRegistry {
 		return settlement;
 	}
 
-	/** Tool results are now persisted; queue unread results for the next model request. */
+	/** Announce unread completions only when the parent has fully settled. */
 	parentReachedBoundary(): void {
+		// An earlier turn_end is not safe: a later agent_wait may still consume the
+		// completion, but cannot retract a steer already queued inside Pi.
+		if (this.parentActive) return;
 		const pending = [...this.pendingAnnouncements.values()];
 		this.pendingAnnouncements.clear();
 		for (const announce of pending) void Promise.resolve(announce()).catch(() => {});

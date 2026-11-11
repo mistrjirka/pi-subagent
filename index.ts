@@ -333,10 +333,13 @@ const SendParamsSchema = Type.Object({
 	}),
 	message: Type.String({ description: "The message text." }),
 	kind: Type.Optional(
-		Type.Union([Type.Literal("instruction"), Type.Literal("diagnostic"), Type.Literal("urgent"), Type.Literal("answer")], {
-			description:
-				"Set answer only to explicitly resolve a waiting ask_parent question. Diagnostic and urgent are for other instructions. Default instruction.",
-		}),
+		Type.Union(
+			[Type.Literal("instruction"), Type.Literal("diagnostic"), Type.Literal("urgent"), Type.Literal("answer")],
+			{
+				description:
+					"Set answer only to explicitly resolve a waiting ask_parent question. Diagnostic and urgent are for other instructions. Default instruction.",
+			},
+		),
 	),
 	evidence: Type.Optional(
 		Type.String({ description: "For kind=diagnostic, concrete fresh evidence: file, finding, and validation source." }),
@@ -1358,10 +1361,16 @@ export default function (pi: ExtensionAPI) {
 			}
 			const completion = settlement.completion;
 			if (settlement.waitingForParent && settlement.question) {
-				if (settlement.questionAnnounced) return {
-					content: [{ type: "text", text: `Agent ${atId(agentId)} is waiting for an answer. Its question has already been queued to the parent as a priority notification; do not repeat it. Reply with agent_send kind=answer.` }],
-					details: { agentId, state: "waiting", waitingForParent: true, questionAnnounced: true },
-				};
+				if (settlement.questionAnnounced)
+					return {
+						content: [
+							{
+								type: "text",
+								text: `Agent ${atId(agentId)} is waiting for an answer. Its question has already been queued to the parent as a priority notification; do not repeat it. Reply with agent_send kind=answer.`,
+							},
+						],
+						details: { agentId, state: "waiting", waitingForParent: true, questionAnnounced: true },
+					};
 				const contextLine = settlement.question.context ? `\nContext: ${settlement.question.context}` : "";
 				return {
 					content: [
@@ -1618,10 +1627,20 @@ export default function (pi: ExtensionAPI) {
 			});
 			const waiting = registry.lookup(target)?.awaitingParent === true;
 			if (waiting && params.kind !== "answer")
-				return toErrorResult(`${atId(target)} is waiting for an ask_parent answer. Use agent_send kind=answer only when explicitly resolving its question.`);
+				return toErrorResult(
+					`${atId(target)} is waiting for an ask_parent answer. Use agent_send kind=answer only when explicitly resolving its question.`,
+				);
 			if (params.kind === "answer" && !waiting)
-				return toErrorResult(`${atId(target)} is not waiting for an ask_parent answer; use a normal instruction instead.`);
-			const r = await handleMessage(pi, registry, { to: target, from: MY_AGENT_ID, message }, true, params.kind === "answer");
+				return toErrorResult(
+					`${atId(target)} is not waiting for an ask_parent answer; use a normal instruction instead.`,
+				);
+			const r = await handleMessage(
+				pi,
+				registry,
+				{ to: target, from: MY_AGENT_ID, message },
+				true,
+				params.kind === "answer",
+			);
 			if (r.ok && params.kind === "diagnostic") registry.recordSentDiagnostic(target, message);
 			if (r.ok && !HAS_PARENT && target !== "@parent" && registry.lookup(target)) registry.startSupervision(target);
 			if (!r.ok) {

@@ -403,7 +403,9 @@ describe("AgentRegistry — explicit wait", () => {
 			waitingForParent: true,
 			question: { from: "child", question: "Approve restricted hold?" },
 		};
-		registry.recordSettlement("child", settlement, () => { notified++; });
+		registry.recordSettlement("child", settlement, () => {
+			notified++;
+		});
 		assert.equal(notified, 1, "priority question is queued before parent settles");
 		assert.equal((await registry.waitForSettlement("child"))?.questionAnnounced, true);
 		registry.parentBecameIdle();

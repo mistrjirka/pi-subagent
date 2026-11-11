@@ -441,11 +441,15 @@ export class ExternalControlBridge {
 			...(this.agent.sessionPath ? { sessionPath: this.agent.sessionPath } : {}),
 			...(this.agent.model ? { model: this.agent.model } : {}),
 			...(this.agent.thinking ? { thinking: this.agent.thinking } : {}),
-			...(this.agent.awaitingParent ? {
-				waitingForParent: true,
-				...(this.agent.pendingQuestion?.question ? { pendingQuestion: this.agent.pendingQuestion.question } : {}),
-				...(this.agent.pendingQuestion?.context ? { pendingQuestionContext: this.agent.pendingQuestion.context } : {}),
-			} : {}),
+			...(this.agent.awaitingParent
+				? {
+						waitingForParent: true,
+						...(this.agent.pendingQuestion?.question ? { pendingQuestion: this.agent.pendingQuestion.question } : {}),
+						...(this.agent.pendingQuestion?.context
+							? { pendingQuestionContext: this.agent.pendingQuestion.context }
+							: {}),
+					}
+				: {}),
 			...(this.agent.status === "running" && this.activeTools.size
 				? { activeTools: [...this.activeTools.values()] }
 				: {}),

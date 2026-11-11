@@ -64,6 +64,8 @@ export interface AgentSettlement {
 	completion: AgentCompletion;
 	waitingForParent?: boolean;
 	question?: AgentQuestion;
+	/** Question already sent to Pi's steering queue; agent_wait must not repeat it. */
+	questionAnnounced?: boolean;
 }
 
 /** An ordinary child message interrupts agent_wait without settling the child. */
@@ -333,7 +335,13 @@ export class AgentRegistry {
 			return true;
 		}
 		if (announce) {
-			if (this.parentActive) this.pendingAnnouncements.set(agentId, announce);
+			if (settlement.waitingForParent && settlement.question) {
+				// ask_parent must reach the next model boundary, not wait for the
+				// parent to settle. Mark before queueing so a later agent_wait does
+				// not repeat the same question as a tool result.
+				settlement.questionAnnounced = true;
+				void Promise.resolve(announce()).catch(() => {});
+			} else if (this.parentActive) this.pendingAnnouncements.set(agentId, announce);
 			else void Promise.resolve(announce()).catch(() => {});
 		}
 		return false;
@@ -558,10 +566,11 @@ export class AgentRegistry {
 	}
 
 	/** Point-to-point delivery to a direct child by exact id. */
-	async deliver(target: string, text: string): Promise<boolean> {
+	async deliver(target: string, text: string, answerToQuestion = false): Promise<boolean> {
 		if (this.closing) return false;
 		const agent = this.agents.get(target);
 		if (!agent?.sendMessage || this.stoppedIds.has(target)) return false;
+		if (agent.awaitingParent && !answerToQuestion) return false;
 		const previous = this.settlements.get(target);
 		const announcement = this.pendingAnnouncements.get(target);
 		// Invalidate before suspension: never erase a completion produced while

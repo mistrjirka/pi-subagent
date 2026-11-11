@@ -16,6 +16,7 @@ export interface ExternallyControllableAgent {
 	readonly persistent?: boolean;
 	readonly status: "queued" | "running" | "completed" | "failed" | "stopped";
 	readonly awaitingParent?: boolean;
+	readonly pendingQuestion?: { question: string; context?: string } | undefined;
 	readonly sessionPath?: string;
 	sendMessage(text: string): Promise<boolean>;
 	stop(): Promise<void>;
@@ -48,6 +49,9 @@ export interface ExternalControlStatus {
 	model?: string;
 	thinking?: string;
 	waitingForParent?: boolean;
+	/** Pending material question shown by PiTTy before a parent model turn. */
+	pendingQuestion?: string;
+	pendingQuestionContext?: string;
 	/** Actual execution, independent of model argument generation and heartbeat. */
 	activeTools?: Array<{ toolCallId: string; toolName: string; startedAt: number; timeoutSeconds?: number }>;
 }
@@ -437,7 +441,11 @@ export class ExternalControlBridge {
 			...(this.agent.sessionPath ? { sessionPath: this.agent.sessionPath } : {}),
 			...(this.agent.model ? { model: this.agent.model } : {}),
 			...(this.agent.thinking ? { thinking: this.agent.thinking } : {}),
-			...(this.agent.awaitingParent ? { waitingForParent: true } : {}),
+			...(this.agent.awaitingParent ? {
+				waitingForParent: true,
+				...(this.agent.pendingQuestion?.question ? { pendingQuestion: this.agent.pendingQuestion.question } : {}),
+				...(this.agent.pendingQuestion?.context ? { pendingQuestionContext: this.agent.pendingQuestion.context } : {}),
+			} : {}),
 			...(this.agent.status === "running" && this.activeTools.size
 				? { activeTools: [...this.activeTools.values()] }
 				: {}),

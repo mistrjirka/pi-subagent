@@ -232,7 +232,7 @@ interface StopParams {
 interface SendParams {
 	to: string;
 	message: string;
-	kind?: "instruction" | "diagnostic" | "urgent";
+	kind?: "instruction" | "diagnostic" | "urgent" | "answer";
 	evidence?: string;
 }
 
@@ -333,9 +333,9 @@ const SendParamsSchema = Type.Object({
 	}),
 	message: Type.String({ description: "The message text." }),
 	kind: Type.Optional(
-		Type.Union([Type.Literal("instruction"), Type.Literal("diagnostic"), Type.Literal("urgent")], {
+		Type.Union([Type.Literal("instruction"), Type.Literal("diagnostic"), Type.Literal("urgent"), Type.Literal("answer")], {
 			description:
-				"Set diagnostic for verified current findings. Use urgent for safety or scope violations. Default instruction.",
+				"Set answer only to explicitly resolve a waiting ask_parent question. Diagnostic and urgent are for other instructions. Default instruction.",
 		}),
 	),
 	evidence: Type.Optional(
@@ -411,6 +411,7 @@ async function handleMessage(
 	registry: AgentRegistry,
 	msg: AgentMessage,
 	outbound: boolean,
+	answerToQuestion = false,
 ): Promise<{ ok: boolean; verb?: string; error?: string }> {
 	if (!outbound && msg.to === "@parent") {
 		// Finish an active agent_wait now. The tool result delivers the message;
@@ -439,7 +440,7 @@ async function handleMessage(
 			// is the LLM's job: it addresses only ids it knows, hop by hop.
 			const text = `${formatFrom(d.message.from)}${d.message.message}`;
 			const queued = registry.lookup(d.childId)?.status === "running";
-			const ok = await registry.deliver(d.childId, text);
+			const ok = await registry.deliver(d.childId, text, answerToQuestion);
 			return ok
 				? { ok: true, verb: queued ? "queued" : "accepted" }
 				: { ok: false, error: `delivery to ${d.childId} failed` };
@@ -1357,6 +1358,10 @@ export default function (pi: ExtensionAPI) {
 			}
 			const completion = settlement.completion;
 			if (settlement.waitingForParent && settlement.question) {
+				if (settlement.questionAnnounced) return {
+					content: [{ type: "text", text: `Agent ${atId(agentId)} is waiting for an answer. Its question has already been queued to the parent as a priority notification; do not repeat it. Reply with agent_send kind=answer.` }],
+					details: { agentId, state: "waiting", waitingForParent: true, questionAnnounced: true },
+				};
 				const contextLine = settlement.question.context ? `\nContext: ${settlement.question.context}` : "";
 				return {
 					content: [
@@ -1560,8 +1565,8 @@ export default function (pi: ExtensionAPI) {
 		description: "Send a message to another agent — a sub-agent or your parent.",
 		promptSnippet: "Send a message to a sub-agent or your parent",
 		promptGuidelines: [
-			"Send follow-up instructions to a persistent or waiting agent with agent_send — its context is intact and it wakes to handle the message.",
-			"When a child is waiting after ask_parent, answer that exact child id with agent_send rather than spawning a replacement.",
+			"Send follow-up instructions to a running or idle agent with agent_send; its context is intact.",
+			"When a child is waiting after ask_parent, answer that exact child id with agent_send kind=answer. Ordinary instructions do not wake a waiting child.",
 			"Do not echo a child’s tool output or transient pi-lens warning. Only forward a current, verified, still-actionable diagnostic using kind=diagnostic with concrete evidence. Identical findings to the same child are deduplicated for ten minutes.",
 			"Use kind=urgent for safety violations, destructive scope mistakes, or immediate cross-owner conflicts. Urgent steering is never deduplicated.",
 		],
@@ -1611,7 +1616,12 @@ export default function (pi: ExtensionAPI) {
 				content: [{ type: "text", text: `Sending to ${atId(target)}\u2026` }],
 				details: { to: target },
 			});
-			const r = await handleMessage(pi, registry, { to: target, from: MY_AGENT_ID, message }, true);
+			const waiting = registry.lookup(target)?.awaitingParent === true;
+			if (waiting && params.kind !== "answer")
+				return toErrorResult(`${atId(target)} is waiting for an ask_parent answer. Use agent_send kind=answer only when explicitly resolving its question.`);
+			if (params.kind === "answer" && !waiting)
+				return toErrorResult(`${atId(target)} is not waiting for an ask_parent answer; use a normal instruction instead.`);
+			const r = await handleMessage(pi, registry, { to: target, from: MY_AGENT_ID, message }, true, params.kind === "answer");
 			if (r.ok && params.kind === "diagnostic") registry.recordSentDiagnostic(target, message);
 			if (r.ok && !HAS_PARENT && target !== "@parent" && registry.lookup(target)) registry.startSupervision(target);
 			if (!r.ok) {

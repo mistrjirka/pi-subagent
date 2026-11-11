@@ -29,6 +29,7 @@ class FakeAgent implements RegisteredAgent {
 	readonly startedAt = Date.now();
 	status: "queued" | "running" | "completed" | "failed" | "stopped" = "running";
 	stoppedByControl = false;
+	awaitingParent = false;
 	stopCalls = 0;
 	stopped = false;
 	/** sendMessage deliveries (texts). */
@@ -391,7 +392,25 @@ describe("AgentRegistry — explicit wait", () => {
 		assert.deepEqual(notified, ["a1"], "settling twice cannot replay the same completion");
 	});
 
-	it("a cached ask_parent settlement consumed by agent_wait cancels its deferred question announcement", async () => {
+	it("announces ask_parent immediately at next safe model boundary without duplicating it in agent_wait", async () => {
+		let notified = 0;
+		const registry = new AgentRegistry({ notify: () => {}, supervisionIntervalMs: 0 });
+		const child = new FakeAgent("child", "waiting", true);
+		child.awaitingParent = true;
+		registry.register(child);
+		const settlement = {
+			completion: completion({ output: "blocked" }),
+			waitingForParent: true,
+			question: { from: "child", question: "Approve restricted hold?" },
+		};
+		registry.recordSettlement("child", settlement, () => { notified++; });
+		assert.equal(notified, 1, "priority question is queued before parent settles");
+		assert.equal((await registry.waitForSettlement("child"))?.questionAnnounced, true);
+		registry.parentBecameIdle();
+		assert.equal(notified, 1, "waiting/idle does not replay the question");
+	});
+
+	it("a cached ask_parent question is queued once and remains accessible through agent_wait", async () => {
 		const announced: string[] = [];
 		const registry = new AgentRegistry({ notify: () => {}, supervisionIntervalMs: 0 });
 		const agent = new FakeAgent("a1", "stay", true);
@@ -405,9 +424,12 @@ describe("AgentRegistry — explicit wait", () => {
 			},
 		);
 
-		assert.equal((await registry.waitForSettlement("a1"))?.question?.question, "Which behavior?");
+		assert.deepEqual(announced, ["question"], "question queues immediately for the model");
+		const cached = await registry.waitForSettlement("a1");
+		assert.equal(cached?.question?.question, "Which behavior?");
+		assert.equal(cached?.questionAnnounced, true);
 		registry.parentBecameIdle();
-		assert.deepEqual(announced, []);
+		assert.deepEqual(announced, ["question"], "no duplicate after parent settles");
 	});
 
 	it("agent_stop wakes an active waiter with a stopped settlement", async () => {
@@ -623,6 +645,17 @@ describe("AgentRegistry — in-tree routing", () => {
 		assert.equal(child.route(msg("zzz")).kind, "error");
 		const { registry: root } = makeRegistry(null, false);
 		assert.equal(root.route(msg("zzz", "")).kind, "error");
+	});
+
+	it("does not accidentally answer a waiting child with an ordinary message", async () => {
+		const { registry } = makeRegistry(null);
+		const child = new FakeAgent("waiting");
+		child.awaitingParent = true;
+		registry.register(child);
+		assert.equal(await registry.deliver("waiting", "unrelated handoff"), false);
+		assert.deepEqual(child.delivered, []);
+		assert.equal(await registry.deliver("waiting", "explicit answer", true), true);
+		assert.deepEqual(child.delivered, ["explicit answer"]);
 	});
 
 	it("delivers a message to a direct child via its sendMessage", async () => {

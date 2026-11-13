@@ -37,6 +37,24 @@ export function maybeWriteFullOutput(agentId: string, output: string): string {
 	return stashPath ? truncationMarker(stashPath) : "";
 }
 
+/** The exact content seen by the model, whether through a notification or a tool result. */
+export function completionContextContent(agent: RegisteredAgent, completion: AgentCompletion): string {
+	return JSON.stringify({
+		status: completion.status,
+		agent_id: `@${agent.agentId}`,
+		// LLM-context protection: cap the visible result (tail 2000 lines /
+		// 50KB, bash parity) — the full text lives in details.result (card
+		// body, never enters LLM context) and the session file.
+		result: truncateForContext(completion.output) + maybeWriteFullOutput(agent.agentId, completion.output),
+		// Only a completed persistent agent stays resident (idle) — a
+		// failed follow-up is cleaned up, so no idle claim.
+		idle: (agent.shouldStayResident ?? agent.persistent) && completion.status === "completed" ? true : undefined,
+		// Resume entry point: sub-agent sessions live outside `pi -r`;
+		// attach with `pi --session <path>`.
+		session_path: completion.sessionPath ?? null,
+	});
+}
+
 /** Deliver a completion notification: LLM JSON at the next safe boundary + user card. */
 export function notifyCompletion(pi: ExtensionAPI, agent: RegisteredAgent, completion: AgentCompletion): void {
 	const details: NotificationDetails = {
@@ -65,20 +83,7 @@ export function notifyCompletion(pi: ExtensionAPI, agent: RegisteredAgent, compl
 	pi.sendMessage(
 		{
 			customType: "subagent-notification",
-			content: JSON.stringify({
-				status: completion.status,
-				agent_id: `@${agent.agentId}`,
-				// LLM-context protection: cap the visible result (tail 2000 lines /
-				// 50KB, bash parity) — the full text lives in details.result (card
-				// body, never enters LLM context) and the session file.
-				result: truncateForContext(completion.output) + maybeWriteFullOutput(agent.agentId, completion.output),
-				// Only a completed persistent agent stays resident (idle) — a
-				// failed follow-up is cleaned up, so no idle claim.
-				idle: (agent.shouldStayResident ?? agent.persistent) && completion.status === "completed" ? true : undefined,
-				// Resume entry point: sub-agent sessions live outside `pi -r`;
-				// attach with `pi --session <path>`.
-				session_path: completion.sessionPath ?? null,
-			}),
+			content: completionContextContent(agent, completion),
 			display: true,
 			details,
 		},

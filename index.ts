@@ -46,7 +46,12 @@ import {
 import { ExternalControlBridge } from "./external-control.js";
 import { createLiveChannels } from "./live-output.js";
 import { resolveModel } from "./model.js";
-import { maybeWriteFullOutput, notifyCompletion, truncateForContext } from "./notification.js";
+import {
+	completionContextContent,
+	maybeWriteFullOutput,
+	notifyCompletion,
+	truncateForContext,
+} from "./notification.js";
 import {
 	discoverAgentProfiles,
 	formatAvailableProfiles,
@@ -58,7 +63,7 @@ import { RecoveryStore } from "./recovery.js";
 import {
 	AgentRegistry,
 	type AgentSettlement,
-	type AgentWaitMessage,
+	type AgentWaitEvent,
 	buildAncestorChain,
 	type RegisteredAgent,
 	type WidgetSurface,
@@ -398,6 +403,24 @@ function spawnErrorResult(
 	};
 }
 
+/** Keep the original custom-message UI when the parent is idle. */
+function deliverParentMessage(pi: ExtensionAPI, msg: AgentMessage): void {
+	pi.sendMessage(
+		{
+			customType: "subagent-message",
+			content: formatParentMessage(msg),
+			display: true,
+			details: {
+				from: msg.from,
+				message: msg.message,
+				...(msg.sentAt ? { sentAt: msg.sentAt } : {}),
+				...(msg.kind ? { kind: msg.kind } : {}),
+			},
+		},
+		{ deliverAs: "steer", triggerTurn: true },
+	);
+}
+
 /**
  * Route one in-tree message through the tree (per-hop O(1) against my
  * direct children). Shared by the agent_send tool (outbound: the caller
@@ -424,20 +447,7 @@ async function handleMessage(
 		// re-route it using this process's own parent capability: at the root
 		// that would incorrectly turn a successful child→root delivery into
 		// "root session has no parent".
-		pi.sendMessage(
-			{
-				customType: "subagent-message",
-				content: formatParentMessage(msg),
-				display: true,
-				details: {
-					from: msg.from,
-					message: msg.message,
-					...(msg.sentAt ? { sentAt: msg.sentAt } : {}),
-					...(msg.kind ? { kind: msg.kind } : {}),
-				},
-			},
-			{ deliverAs: "steer", triggerTurn: true },
-		);
+		if (!registry.queueParentMessageIfActive(msg)) deliverParentMessage(pi, msg);
 		return { ok: true, verb: "delivered" };
 	}
 
@@ -455,8 +465,10 @@ async function handleMessage(
 		}
 		case "parent": {
 			// Outbound only: inbound child→parent delivery is handled above.
-			uiRef?.setStatus(MSG_STATUS_KEY, JSON.stringify(d.message));
-			return { ok: true, verb: "delivered" };
+			if (!uiRef) return { ok: false, error: "Cannot deliver to @parent: child extension UI channel is unavailable." };
+			uiRef.setStatus(MSG_STATUS_KEY, JSON.stringify(d.message));
+			// setStatus emits an event, but offers no parent-receipt acknowledgement.
+			return { ok: true, verb: "sent" };
 		}
 		case "error": {
 			if (!outbound && msg.from) {
@@ -576,10 +588,38 @@ export default function (pi: ExtensionAPI) {
 	// spawn background work. Track the parent's actual active/settled window at
 	// every depth so resumed-child announcements cannot race a late agent_wait.
 	pi.on("agent_start", () => registry.parentBecameActive());
+	// If progress arrives after the last tool result, steer it at the next
+	// model-turn boundary rather than holding it until the parent fully settles.
+	// Completions remain deferred, because agent_wait may still consume them.
+	pi.on("turn_end", () => {
+		for (const message of registry.takePendingParentMessages()) deliverParentMessage(pi, message);
+	});
 	// Do not announce at turn_end: Pi queues the steer immediately, but a later
 	// agent_wait can consume the same result before that steer reaches the model.
-	// Only announce unconsumed completions once the parent is idle.
-	pi.on("agent_settled", () => registry.parentBecameIdle());
+	// A tool result reports earlier completions; idle is the fallback boundary.
+	pi.on("agent_settled", () => {
+		const messages = registry.takePendingParentMessages();
+		registry.parentBecameIdle();
+		for (const message of messages) deliverParentMessage(pi, message);
+	});
+
+	// A tool result is the next safe model-visible boundary during an active turn.
+	// Consume once, while preserving the original tool output and error flag.
+	pi.on("tool_result", (event) => {
+		const { messages, completions } = registry.takePendingForToolResult();
+		if (!messages.length && !completions.length) return undefined;
+		const text = [
+			"[Subagent updates received during this turn]",
+			...messages.map((message) => `Message: ${formatParentMessage(message)}`),
+			...completions.map(({ agent, completion }) => `Completion: ${completionContextContent(agent, completion)}`),
+		].join("\n");
+		return {
+			content: [...event.content, { type: "text", text }],
+			details: event.details,
+			isError: event.isError,
+			usage: event.usage,
+		};
+	});
 
 	// Inbound messages (a child addresses @parent, forwards a sibling's
 	// message, or reports an unroutable target) land here from its rpc event
@@ -1133,7 +1173,7 @@ export default function (pi: ExtensionAPI) {
 							content: [
 								{
 									type: "text",
-									text: `${resumeSessionPath ? "Resumed" : "Started"} background agent @${agent.agentId}. Completion arrives as a notification.${recoveryId ? ` Recovery id: ${recoveryId} (list with agent_recover).` : ""}`,
+									text: `${resumeSessionPath ? "Resumed" : "Started"} background agent @${agent.agentId}. Completion arrives in the next tool result or notification.${recoveryId ? ` Recovery id: ${recoveryId} (list with agent_recover).` : ""}`,
 								},
 							],
 							details: {
@@ -1308,7 +1348,7 @@ export default function (pi: ExtensionAPI) {
 				content: [{ type: "text", text: `Waiting for ${atId(agentId)} (${waitLabel})…` }],
 				details: { agentId, timeoutSeconds },
 			});
-			let settlement: AgentSettlement | AgentWaitMessage | null | undefined;
+			let settlement: AgentSettlement | AgentWaitEvent | null | undefined;
 			try {
 				settlement = await registry.waitForSettlement(agentId, signal, timeoutMs, true);
 			} catch (error) {
@@ -1352,6 +1392,17 @@ export default function (pi: ExtensionAPI) {
 				};
 			}
 			if (!settlement) return toErrorResult(`Unknown or no-longer-waitable direct child ${atId(agentId)}.`);
+			if ("kind" in settlement && settlement.kind === "other_wait") {
+				return {
+					content: [
+						{
+							type: "text",
+							text: `Another concurrent agent_wait returned this ${settlement.reason}. See its tool result for the details.`,
+						},
+					],
+					details: { agentId, state: "other_wait", reason: settlement.reason },
+				};
+			}
 			if ("message" in settlement) {
 				const message = settlement.message;
 				return {
@@ -1365,6 +1416,17 @@ export default function (pi: ExtensionAPI) {
 				};
 			}
 			const completion = settlement.completion;
+			if (settlement.deliveredInToolResult) {
+				return {
+					content: [
+						{
+							type: "text",
+							text: `Agent ${atId(agentId)} ${completion.status}; its result was already included in a prior tool result.`,
+						},
+					],
+					details: { agentId, state: completion.status, alreadyDelivered: true },
+				};
+			}
 			if (settlement.waitingForParent && settlement.question) {
 				if (settlement.questionAnnounced)
 					return {

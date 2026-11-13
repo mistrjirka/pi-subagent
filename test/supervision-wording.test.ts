@@ -53,8 +53,12 @@ describe("supervision wording stays plain", () => {
 		assert.ok(readmeSource.includes("get_entries(since)"), "README lost the stable entry cursor contract");
 	});
 
-	it("flushes deferred completion announcements only after the parent fully settles", () => {
-		assert.ok(indexSource.includes('pi.on("agent_settled", () => registry.parentBecameIdle())'));
+	it("delivers pending updates through a tool result or the idle fallback", () => {
+		assert.ok(indexSource.includes('pi.on("turn_end", () => {'));
+		assert.ok(indexSource.includes('pi.on("tool_result", (event) => {'));
+		assert.ok(indexSource.includes("registry.takePendingForToolResult()"));
+		assert.ok(indexSource.includes('pi.on("agent_settled", () => {'));
+		assert.ok(indexSource.includes("registry.parentBecameIdle()"));
 		assert.ok(!indexSource.includes('pi.on("agent_end", () => registry.parentBecameIdle())'));
 		assert.ok(indexSource.includes("current !== agent"), "stale reminder re-check missing");
 	});

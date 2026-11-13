@@ -62,6 +62,8 @@ export interface RegisteredAgent {
 
 export interface AgentSettlement {
 	completion: AgentCompletion;
+	/** Already included in a parent tool result, so agent_wait must not repeat it. */
+	deliveredInToolResult?: boolean;
 	waitingForParent?: boolean;
 	question?: AgentQuestion;
 	/** Question already sent to Pi's steering queue; agent_wait must not repeat it. */
@@ -73,6 +75,13 @@ export interface AgentWaitMessage {
 	kind: "message";
 	message: AgentMessage;
 }
+
+/** The other parallel waiters resume without repeating one child's payload. */
+export interface AgentWaitCoalesced {
+	kind: "other_wait";
+	reason: "message" | "completion";
+}
+export type AgentWaitEvent = AgentWaitMessage | AgentWaitCoalesced;
 
 /** Narrow widget surface — index.ts adapts the TUI AgentWidget to it. */
 export interface WidgetSurface {
@@ -151,6 +160,11 @@ export function buildAncestorChain(newId: string, ownId: string, inheritedRaw: s
 	return chain.join(",");
 }
 
+interface PendingAnnouncement {
+	announce: () => Promise<void> | void;
+	inline?: { agent: RegisteredAgent; completion: AgentCompletion };
+}
+
 export class AgentRegistry {
 	private readonly agents = new Map<string, RegisteredAgent>();
 	private readonly notify: AgentRegistryDeps["notify"];
@@ -160,17 +174,19 @@ export class AgentRegistry {
 	private readonly settlements = new Map<string, AgentSettlement>();
 	private readonly settlementWaiters = new Map<
 		string,
-		Set<(settlement: AgentSettlement | AgentWaitMessage | null | undefined) => void>
+		Set<(settlement: AgentSettlement | AgentWaitEvent | null | undefined) => void>
 	>();
 	/** Only explicit agent_wait calls subscribe. Child messages wake them without a duplicate steer. */
-	private readonly messageWaiters = new Set<(message: AgentWaitMessage) => void>();
+	private readonly messageWaiters = new Set<(message: AgentWaitEvent) => void>();
 	/**
 	 * Completion/question announcements that settled during an active parent turn.
 	 * They are flushed at the next completed tool/model boundary, unless a
 	 * wait or inspection consumes the cached settlement first. This prevents a stale queued
 	 * follow-up from arriving after the model already read the same result.
 	 */
-	private readonly pendingAnnouncements = new Map<string, () => Promise<void> | void>();
+	private readonly pendingAnnouncements = new Map<string, PendingAnnouncement>();
+	/** Progress received while the parent was actively running. */
+	private readonly pendingParentMessages: AgentMessage[] = [];
 	private readonly remind: NonNullable<AgentRegistryDeps["remind"]>;
 	private readonly supervisionIntervalMs: number;
 	private readonly supervisionTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -298,7 +314,40 @@ export class AgentRegistry {
 		if (this.parentActive) return;
 		const pending = [...this.pendingAnnouncements.values()];
 		this.pendingAnnouncements.clear();
-		for (const announce of pending) void Promise.resolve(announce()).catch(() => {});
+		for (const item of pending) void Promise.resolve(item.announce()).catch(() => {});
+	}
+
+	/** Buffer progress until the next tool result, but never suppress progress messages. */
+	queueParentMessageIfActive(message: AgentMessage): boolean {
+		if (this.closing || !this.parentActive) return false;
+		this.pendingParentMessages.push(message);
+		return true;
+	}
+
+	/** Claim pending updates exactly once for a model-visible tool result. */
+	takePendingForToolResult(
+		maxMessages = 16,
+		maxCompletions = 4,
+	): {
+		messages: AgentMessage[];
+		completions: Array<{ agent: RegisteredAgent; completion: AgentCompletion }>;
+	} {
+		const messages = this.pendingParentMessages.splice(0, maxMessages);
+		const completions: Array<{ agent: RegisteredAgent; completion: AgentCompletion }> = [];
+		for (const [id, item] of this.pendingAnnouncements) {
+			if (!item.inline || completions.length >= maxCompletions) continue;
+			const settlement = this.settlements.get(id);
+			if (!settlement || settlement.completion !== item.inline.completion) continue;
+			settlement.deliveredInToolResult = true;
+			completions.push(item.inline);
+			this.pendingAnnouncements.delete(id);
+		}
+		return { messages, completions };
+	}
+
+	/** Retrieve remaining progress for the original asynchronous notification path. */
+	takePendingParentMessages(): AgentMessage[] {
+		return this.pendingParentMessages.splice(0);
 	}
 
 	acceptsCompletion(agent: RegisteredAgent, completion: AgentCompletion): boolean {
@@ -316,7 +365,12 @@ export class AgentRegistry {
 	 * immediately while the parent is idle or deferred until its next safe boundary.
 	 * A complete result read by wait/inspect cancels that announcement.
 	 */
-	recordSettlement(agentId: string, settlement: AgentSettlement, announce?: () => Promise<void> | void): boolean {
+	recordSettlement(
+		agentId: string,
+		settlement: AgentSettlement,
+		announce?: () => Promise<void> | void,
+		inline?: { agent: RegisteredAgent; completion: AgentCompletion },
+	): boolean {
 		const live = this.agents.get(agentId);
 		if (
 			this.closing ||
@@ -331,7 +385,11 @@ export class AgentRegistry {
 		const waiters = this.settlementWaiters.get(agentId);
 		if (waiters?.size) {
 			this.settlementWaiters.delete(agentId);
-			for (const resolve of waiters) resolve(settlement);
+			let first = true;
+			for (const resolve of [...waiters]) {
+				resolve(first ? settlement : { kind: "other_wait", reason: "completion" });
+				first = false;
+			}
 			return true;
 		}
 		if (announce) {
@@ -341,7 +399,7 @@ export class AgentRegistry {
 				// not repeat the same question as a tool result.
 				settlement.questionAnnounced = true;
 				void Promise.resolve(announce()).catch(() => {});
-			} else if (this.parentActive) this.pendingAnnouncements.set(agentId, announce);
+			} else if (this.parentActive) this.pendingAnnouncements.set(agentId, { announce, inline });
 			else void Promise.resolve(announce()).catch(() => {});
 		}
 		return false;
@@ -356,7 +414,12 @@ export class AgentRegistry {
 	wakeWaitForMessage(message: AgentMessage): boolean {
 		if (this.closing || this.messageWaiters.size === 0) return false;
 		const event: AgentWaitMessage = { kind: "message", message };
-		for (const wake of [...this.messageWaiters]) wake(event);
+		// Wake the full tool batch, but include this payload in only one result.
+		let first = true;
+		for (const wake of [...this.messageWaiters]) {
+			wake(first ? event : { kind: "other_wait", reason: "message" });
+			first = false;
+		}
 		return true;
 	}
 
@@ -465,13 +528,13 @@ export class AgentRegistry {
 		signal: AbortSignal | undefined,
 		timeoutMs: number | undefined,
 		wakeOnMessage: true,
-	): Promise<AgentSettlement | AgentWaitMessage | null | undefined>;
+	): Promise<AgentSettlement | AgentWaitEvent | null | undefined>;
 	async waitForSettlement(
 		agentId: string,
 		signal?: AbortSignal,
 		timeoutMs?: number,
 		wakeOnMessage = false,
-	): Promise<AgentSettlement | AgentWaitMessage | null | undefined> {
+	): Promise<AgentSettlement | AgentWaitEvent | null | undefined> {
 		const cached = this.consumeSettlement(agentId);
 		if (cached) {
 			// The parent explicitly consumed this already-settled turn. If its
@@ -490,10 +553,10 @@ export class AgentRegistry {
 			this.resumeSupervision(agentId);
 			return null;
 		}
-		return await new Promise<AgentSettlement | AgentWaitMessage | null | undefined>((resolve, reject) => {
+		return await new Promise<AgentSettlement | AgentWaitEvent | null | undefined>((resolve, reject) => {
 			const waiters =
 				this.settlementWaiters.get(agentId) ??
-				new Set<(event: AgentSettlement | AgentWaitMessage | null | undefined) => void>();
+				new Set<(event: AgentSettlement | AgentWaitEvent | null | undefined) => void>();
 			let timer: ReturnType<typeof setTimeout> | undefined;
 			const detachWaiter = () => {
 				waiters.delete(finish);
@@ -506,11 +569,11 @@ export class AgentRegistry {
 				if (timer) clearTimeout(timer);
 				this.resumeSupervision(agentId);
 			};
-			const finish = (event: AgentSettlement | AgentWaitMessage | null | undefined) => {
+			const finish = (event: AgentSettlement | AgentWaitEvent | null | undefined) => {
 				cleanup();
 				resolve(event);
 			};
-			const wake = (message: AgentWaitMessage) => finish(message);
+			const wake = (message: AgentWaitEvent) => finish(message);
 			const onAbort = () => {
 				cleanup();
 				reject(new Error("agent_wait cancelled"));
@@ -543,6 +606,7 @@ export class AgentRegistry {
 			agent.agentId,
 			{ completion },
 			agent.stoppedByControl ? undefined : () => this.notify(agent, completion),
+			agent.stoppedByControl ? undefined : { agent, completion },
 		);
 		if ((agent.shouldStayResident ?? agent.persistent) && completion.status === "completed") {
 			// Resident — no remove, no stop. Notification delivery is owned by
@@ -645,6 +709,7 @@ export class AgentRegistry {
 		for (const waiters of this.settlementWaiters.values()) for (const resolve of waiters) resolve(undefined);
 		this.settlementWaiters.clear();
 		this.pendingAnnouncements.clear();
+		this.pendingParentMessages.length = 0;
 		this.settlements.clear();
 		this.shutdownPromise = (async () => {
 			const results = await Promise.allSettled(owned.map((agent) => agent.stop()));

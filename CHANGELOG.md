@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.5.12 — eager subagent updates and deduplicated results
+
+- Deliver child progress messages and completed child results in the next parent tool result, so the model can act without waiting for the parent's turn to settle.
+- Preserve the original tool output, error state and usage while adding child updates. Keep the existing asynchronous notification path when no tool result is available.
+- Deliver each update once. Avoid duplicate updates across concurrent `agent_wait` calls, completed results already included in another tool result, and follow-up notifications.
+- Retain child sender timestamps. Report an unavailable parent channel as an error rather than claiming successful delivery.
+- Keep existing progress messages and prompt rules unchanged.
+
+Validation: 367 tests and TypeScript pass. Two actual Pi runs on master confirmed parent-model visibility, persisted session output, and suppression of a repeated `agent_wait` completion. Full logs: `~/.pi/agent/logs/subagent-e2e-20261113/`.
+
 ## 0.5.11 — reliable parent questions and queued completions
 
 - Deliver `ask_parent` questions as priority steering messages, so they reach the parent model at its next safe boundary instead of waiting for the whole run to settle.

@@ -1,5 +1,7 @@
 # Runtime boundaries
 
+- `index.ts` owns the extension-level registry, parent message transport, recovery state, monitoring tools and shutdown; `spawn-tool.ts` registers and executes the spawn tool using explicit typed ports and the existing `spawn-session.ts` state machine.
+- `spawn-identity.ts` builds a strictly named child environment with the required tree ID, delegation allowlist and ancestor chain; `tree-telemetry.ts` exports the typed parent telemetry port.
 - `discovery-tools.ts` owns read-only active-agent listing and saved-session recovery tool registration. `parent-delivery.ts` owns model-turn boundaries and tool-result error/notification transformations. Their order preserves receipt-first completion delivery.
 - `tree-telemetry.ts` owns nested-child event tracking and `supervision-reminder.ts` generates bounded, current-session-checked supervision messages. `index.ts` remains the root process bootstrap and spawn lifecycle entrypoint.
 - `message-router.ts` owns hop-by-hop direct-child delivery, parent status transport, and the parent message fallback. `MessageRouter` holds the Pi and registry ports. It does not own child lifetime or announcements.

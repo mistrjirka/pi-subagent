@@ -275,6 +275,8 @@ Parameters:
 
 Nested agents do not get `run_in_background`; their parent waits for them directly.
 
+When `pi-one-round-compaction` 0.4.4+ is installed, a checkpoint also captures a small snapshot of direct active children. It includes their `@id`, running/waiting/idle state, label, and brief task preview. This roster is counted against the same post-compaction token target. No full child conversations or tool results are copied. The snapshot can become stale after compaction, so use `agent_list` to refresh it.
+
 ### `agent_list` (current Pi process, including after compaction)
 
 Call `agent_list` with `{}` to list running, waiting, resident/idle, and recently finished *direct* children with their agent IDs. This is read-only and does not inspect their conversations, start a worker, or consume a queued result. Use it after a context compaction or when the parent no longer remembers which agents are active. A parent compaction does **not** stop its children; it only replaces older parent conversation history.

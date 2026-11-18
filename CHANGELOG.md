@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.22 — separate parent monitoring tool handlers
+
+- Move `agent_wait` and `agent_inspect` registration, supervised timeout handling, unread transcript pages and completion-response formatting into `monitoring-tools.ts`.
+- Keep their shared transcript cursor owned by the parent entrypoint and injected through a typed callback. Schema-derived tool argument types, exact model-facing instructions and results, parent questions, and completion deduplication remain unchanged.
+- Reduce `index.ts` from 1,524 to 1,272 lines. Update source-level supervision tests to read the new module instead of assuming every instruction lives in the entrypoint.
+
+Validation: 417 tests, TypeScript and Biome pass. No running sessions were changed.
+
 ## 0.5.21 — split child process and event-stream services
 
 - Extract `ChildEventWriter` from `ExternalControlBridge`, separating the bounded JSONL event stream from direct steer/stop and status I/O. Preserve the existing `events.jsonl` wire format, file permissions, byte cap, coalescing boundaries and flush behavior.

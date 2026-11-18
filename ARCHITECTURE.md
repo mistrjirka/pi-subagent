@@ -1,5 +1,7 @@
 # Runtime boundaries
 
+- `discovery-tools.ts` owns read-only active-agent listing and saved-session recovery tool registration. `parent-delivery.ts` owns model-turn boundaries and tool-result error/notification transformations. Their order preserves receipt-first completion delivery.
+- `tree-telemetry.ts` owns nested-child event tracking and `supervision-reminder.ts` generates bounded, current-session-checked supervision messages. `index.ts` remains the root process bootstrap and spawn lifecycle entrypoint.
 - `message-router.ts` owns hop-by-hop direct-child delivery, parent status transport, and the parent message fallback. `MessageRouter` holds the Pi and registry ports. It does not own child lifetime or announcements.
 - `control-tools.ts` registers `agent_stop`, `agent_send`, and `ask_parent` with the same schema-derived arguments. It injects typed actions for message routing, status updates, tree removal, and recovery retirement instead of reading extension-global state.
 - `tool-params.ts` defines Pi tool schemas and derives argument types with TypeBox `Static`. The `agent_spawn` schema is different for root and child processes. The single explicit `SpawnParams` cast at the registered handler is the boundary for that runtime-dependent choice; other tool handlers use inferred schema types.

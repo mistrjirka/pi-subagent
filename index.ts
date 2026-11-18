@@ -77,6 +77,7 @@ import {
 } from "./registry.js";
 import { renderNotification } from "./render.js";
 import { SpawnCoordinator } from "./spawn-coordinator.js";
+import { presentBackgroundSpawn, presentFinishedSpawn, type SpawnPresentationContext } from "./spawn-result.js";
 import { runSpawnSession, type SpawnOutcome } from "./spawn-session.js";
 import { getMonitoringTranscript, IncrementalTranscriptCursor } from "./transcript.js";
 import { createSubtreeDisplay } from "./tree-display.js";
@@ -968,173 +969,44 @@ export default function (pi: ExtensionAPI) {
 				}
 
 				subtree.closeCard(); // from here on onUpdate cannot refresh the card
+				const presentation = (): SpawnPresentationContext => {
+					const question = pendingQuestion ?? agent.pendingQuestion;
+					return {
+						agent,
+						profile: profile.name,
+						task,
+						treeId: AGENT_TREE_ID,
+						parentAgentId: MY_AGENT_ID || "root",
+						controlDir: control.controlDir,
+						statusPath: control.statusPath,
+						startedAt,
+						nested: subtree.nested(),
+						...(resumeSessionPath ? { resumeSessionPath } : {}),
+						...(recoveryId ? { recoveryId } : {}),
+						...(question ? { pendingQuestion: question } : {}),
+					};
+				};
 				switch (outcome.kind) {
 					case "spawn-failed":
 						if (recoveryId) {
 							recovery?.suspend(recoveryId);
 							childRecoveryIds.delete(agentId);
 						}
-						// The isError return carries the failure to the LLM and the status
-						// line shows it to the user — no follow-up notification on top.
-						return spawnErrorResult(outcome, {
-							runInBackground,
-							label: agent.label,
-						});
-
+						return spawnErrorResult(outcome, { runInBackground, label: agent.label });
 					case "background-started": {
-						onUpdate?.({
-							content: [{ type: "text", text: `Started ${agent.label} (background)` }],
-							details: {
-								runInBackground: true,
-								runtime: "profiled-subagents",
-								profile: profile.name,
-								treeId: AGENT_TREE_ID,
-								parentAgentId: MY_AGENT_ID || "root",
-								agentId,
-								controlDir: control.controlDir,
-								statusPath: control.statusPath,
-								state: agent.awaitingParent ? "waiting" : agent.status,
-								label: agent.label,
-								model: agent.model,
-								thinking: agent.thinking,
-								startedAt,
-							} satisfies SubagentDetails,
-						});
-						return {
-							content: [
-								{
-									type: "text",
-									text: `${resumeSessionPath ? "Resumed" : "Started"} background agent @${agent.agentId}. Completion arrives in the next tool result or notification.${recoveryId ? ` Recovery id: ${recoveryId} (list with agent_recover).` : ""}`,
-								},
-							],
-							details: {
-								runInBackground: true,
-								runtime: "profiled-subagents",
-								profile: profile.name,
-								treeId: AGENT_TREE_ID,
-								parentAgentId: MY_AGENT_ID || "root",
-								agentId,
-								controlDir: control.controlDir,
-								statusPath: control.statusPath,
-								state: agent.awaitingParent ? "waiting" : agent.status,
-								label: agent.label,
-								model: agent.model,
-								thinking: agent.thinking,
-								startedAt,
-							} satisfies SubagentDetails,
-						};
+						const shown = presentBackgroundSpawn(presentation());
+						if (shown.progress) onUpdate?.(shown.progress);
+						return shown.result;
 					}
-
 					case "finished": {
-						// Only idle successful persistent children stay attached. Failed,
-						// stopped or cancelled workers release their on-disk lease now.
 						if (recoveryId && !outcome.resident) {
 							if (outcome.stoppedByControl) recovery?.retire(recoveryId);
 							else recovery?.suspend(recoveryId);
 							childRecoveryIds.delete(agentId);
 						}
-						if (outcome.status === "completed" && agent.awaitingParent) {
-							const question = pendingQuestion ?? agent.pendingQuestion;
-							if (question) {
-								const contextLine = question.context ? `\nContext: ${question.context}` : "";
-								return {
-									content: [
-										{
-											type: "text",
-											text: `Agent @${agentId} is waiting for your answer:\n${question.question}${contextLine}\n\nReply to the same agent with agent_send; its context is preserved.`,
-										},
-									],
-									details: {
-										runtime: "profiled-subagents",
-										agentId,
-										profile: profile.name,
-										treeId: AGENT_TREE_ID,
-										parentAgentId: MY_AGENT_ID || "root",
-										label,
-										controlDir: control.controlDir,
-										statusPath: control.statusPath,
-										state: "waiting",
-										waitingForParent: true,
-										question: question.question,
-										context: question.context,
-										sessionPath: outcome.sessionPath,
-										sessionId: outcome.sessionId,
-									},
-								};
-							}
-						}
-						// Failed or externally-stopped children are errors for the caller: the
-						// stopped case must not look like a clean success. A user cancel
-						// (abort) also produces a stopped outcome.
-						if (outcome.status === "failed" || outcome.status === "stopped") {
-							if (HAS_PARENT && !outcome.resident)
-								tree.remove(agentId, outcome.status === "failed" ? "failed" : "stopped");
-							const message =
-								outcome.status === "failed"
-									? outcome.output || "Sub-agent failed."
-									: outcome.stoppedByControl
-										? outcome.output || "Sub-agent stopped."
-										: outcome.output || "Sub-agent stopped before completing; output may be partial.";
-							return {
-								content: [{ type: "text", text: truncateForContext(message) }],
-								details: {
-									runtime: "profiled-subagents",
-									profile: profile.name,
-									treeId: AGENT_TREE_ID,
-									parentAgentId: MY_AGENT_ID || "root",
-									agentId,
-									controlDir: control.controlDir,
-									statusPath: control.statusPath,
-									state: agent.status,
-									task,
-									startedAt,
-									endedAt: outcome.endedAt,
-									// Full message (uncapped) — the user reads it on the card,
-									// folded but never dropped; the LLM sees the capped copy.
-									error: message,
-									model: agent.model,
-									thinking: agent.thinking,
-									sessionPath: outcome.sessionPath,
-									events: outcome.events,
-									nested: subtree.nested(),
-								} satisfies SubagentDetails,
-								isError: true,
-							};
-						}
-						if (HAS_PARENT && !outcome.resident) tree.remove(agentId, "done");
-						return {
-							// Pure text result — no session hint: the output stands alone
-							// (the session path is the card footer, recoverable by the user).
-							// A persistent foreground agent stays resident — the LLM needs
-							// its id to wake it later with agent_send (or stop it).
-							content: [
-								{
-									type: "text",
-									text: outcome.resident
-										? `${truncateForContext(outcome.output)}${maybeWriteFullOutput(agent.agentId, outcome.output)}\n\n(agent @${agent.agentId} is resident \u2014 send it follow-ups with agent_send)`
-										: truncateForContext(outcome.output) + maybeWriteFullOutput(agent.agentId, outcome.output),
-								},
-							],
-							details: {
-								runtime: "profiled-subagents",
-								profile: profile.name,
-								treeId: AGENT_TREE_ID,
-								parentAgentId: MY_AGENT_ID || "root",
-								agentId,
-								controlDir: control.controlDir,
-								statusPath: control.statusPath,
-								state: agent.awaitingParent ? "waiting" : agent.status,
-								task,
-								sessionPath: outcome.sessionPath,
-								sessionId: outcome.sessionId,
-								startedAt,
-								endedAt: outcome.endedAt,
-								model: agent.model,
-								thinking: agent.thinking,
-								events: outcome.events,
-								nested: subtree.nested(),
-							} satisfies SubagentDetails,
-						};
+						const shown = presentFinishedSpawn(outcome, presentation(), HAS_PARENT);
+						if (shown.treeRemoval) tree.remove(agentId, shown.treeRemoval);
+						return shown.result;
 					}
 				}
 			},

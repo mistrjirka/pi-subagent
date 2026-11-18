@@ -642,6 +642,27 @@ export default function (pi: ExtensionAPI) {
 				.join("; ")
 		: "none";
 
+	// Context compaction replaces the parent's textual history, not the live
+	// in-process children. Expose their current names without reading transcripts
+	// so a compacted parent can rediscover them instead of spawning duplicates.
+	pi.registerTool({
+		name: "agent_list",
+		label: "List Direct Agents",
+		description:
+			"Read-only list of running, waiting, resident/idle and recently finished direct child agents in this Pi process. Use after compaction or when an agent id is uncertain. After a Pi restart use agent_recover for saved persistent sessions instead.",
+		promptSnippet: "Rediscover current direct child agents and their states after context compaction",
+		parameters: Type.Object({ limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })) }),
+		async execute(_callId, raw) {
+			const requested = (raw as { limit?: number }).limit;
+			const limit =
+				typeof requested === "number" && Number.isSafeInteger(requested) ? Math.max(1, Math.min(100, requested)) : 20;
+			return {
+				content: [{ type: "text", text: registry.describeMessageTargets("", limit) }],
+				details: { limit },
+			};
+		},
+	});
+
 	if (recovery) {
 		pi.registerTool({
 			name: "agent_recover",

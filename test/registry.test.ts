@@ -192,6 +192,26 @@ describe("AgentRegistry — tracking", () => {
 		assert.doesNotMatch(text, /@tara \(stage-3, running\)/);
 	});
 
+	it("a read-only roster can rediscover children after parent context compaction", async () => {
+		const { registry } = makeRegistry();
+		const running = new FakeAgent("sage", "implementation");
+		registry.register(running);
+		const resident = new FakeAgent("ren", "review", true);
+		resident.status = "completed";
+		registry.register(resident, "idle");
+		const finished = new FakeAgent("mira", "explore");
+		registry.register(finished);
+		await registry.complete(finished, completion({ status: "completed" }));
+		const before = registry.describeMessageTargets("", 20);
+		assert.match(before, /@sage \(implementation, running\)/);
+		assert.match(before, /@ren \(review, idle, reusable\)/);
+		assert.match(before, /@mira \(completed, exited\)/);
+		assert.doesNotMatch(before, /no such agent/i);
+		assert.equal(registry.describeMessageTargets("", 20), before);
+		assert.equal(registry.lookup("sage"), running);
+		assert.ok(registry.peekSettlement("mira"));
+	});
+
 	it("a failed send only suggests this hop's children and bounds the listing", () => {
 		const { registry } = makeRegistry();
 		for (let i = 0; i < 13; i++) registry.register(new FakeAgent(`a${i}`));

@@ -35,9 +35,10 @@ class FakeClient {
 	});
 
 	/** Simulated session stats returned by get_session_stats. */
-	stats: { tokens: number; toolCalls: number; output?: number; context?: number | null } = {
+	stats: { tokens: number; toolCalls: number; totalMessages?: number; output?: number; context?: number | null } = {
 		tokens: 100,
 		toolCalls: 2,
+		totalMessages: 2,
 	};
 	/** Simulated preflight result. */
 	promptOk = true;
@@ -108,6 +109,7 @@ class FakeClient {
 					command: "get_session_stats",
 					success: true,
 					data: {
+						totalMessages: this.stats.totalMessages,
 						tokens: { total: this.stats.tokens, output: this.stats.output },
 						contextUsage: { tokens: this.stats.context },
 						toolCalls: this.stats.toolCalls,
@@ -266,9 +268,40 @@ describe("AgentProcess — spawnAndSend", () => {
 		assert.equal(ready, old);
 		assert.deepEqual(
 			fake.commands.slice(0, 3).map((x) => x.type),
-			["get_state", "get_messages", "prompt"],
+			["get_state", "get_session_stats", "prompt"],
 		);
 		assert.equal(fake.commands[2]?.message, "Continue the accepted task; check current files first.");
+	});
+
+	it("verifies recovered history through counts without transferring large messages", async () => {
+		const old = "/tmp/saved-big-session.jsonl";
+		const { agent, fake } = makeAgent({ cwd: "/tmp", resumeSessionPath: old });
+		fake.sessionFile = old;
+		fake.stats.totalMessages = 1_000_000;
+		const resumed = await agent.spawnAndSend("Continue after checking the current workspace");
+		assert.deepEqual(resumed, { ok: true });
+		assert.deepEqual(
+			fake.commands.slice(0, 3).map((command) => command.type),
+			["get_state", "get_session_stats", "prompt"],
+		);
+		assert.ok(!fake.commands.some((command) => command.type === "get_messages"));
+	});
+
+	it("fails closed when the recovered transcript has no message count", async () => {
+		const old = "/tmp/empty-session.jsonl";
+		const { agent, fake } = makeAgent({ cwd: "/tmp", resumeSessionPath: old });
+		fake.sessionFile = old;
+		fake.stats.totalMessages = 0;
+		const result = await agent.spawnAndSend("must not execute");
+		assert.deepEqual(result, {
+			ok: false,
+			error: "Saved session message count could not be verified. No task was sent.",
+		});
+		assert.equal(agent.status, "failed");
+		assert.deepEqual(
+			fake.commands.map((command) => command.type),
+			["get_state", "get_session_stats"],
+		);
 	});
 
 	it("refuses wrong restored context before delivering a task", async () => {

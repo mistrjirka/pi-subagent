@@ -428,7 +428,10 @@ export class IncrementalTranscriptCursor {
 
 	private serialize<T>(work: () => Promise<T>): Promise<T> {
 		const result = this.queue.then(work);
-		this.queue = result.then(() => undefined, () => undefined);
+		this.queue = result.then(
+			() => undefined,
+			() => undefined,
+		);
 		return result;
 	}
 
@@ -439,7 +442,11 @@ export class IncrementalTranscriptCursor {
 	): Promise<IncrementalMonitoringTranscript> {
 		return this.serialize(async () => {
 			const snapshot = await getIncrementalMonitoringTranscript(
-				agent, this.afterEntryId, options, this.sessionCursor, this.shownRecentIds,
+				agent,
+				this.afterEntryId,
+				options,
+				this.sessionCursor,
+				this.shownRecentIds,
 			);
 			if (snapshot.nextCursor) this.afterEntryId = snapshot.nextCursor;
 			for (const id of snapshot.shownEntryIds ?? []) this.shownRecentIds.add(id);
@@ -460,21 +467,32 @@ export class IncrementalTranscriptCursor {
 			if (!agent.sessionPath) {
 				// Older runtimes without a session file retain the safe incremental fallback.
 				const snapshot = await getIncrementalMonitoringTranscript(
-					agent, this.afterEntryId, options, this.sessionCursor, this.shownRecentIds,
+					agent,
+					this.afterEntryId,
+					options,
+					this.sessionCursor,
+					this.shownRecentIds,
 				);
 				if (snapshot.nextCursor) this.afterEntryId = snapshot.nextCursor;
 				for (const id of snapshot.shownEntryIds ?? []) this.shownRecentIds.add(id);
 				return snapshot;
 			}
-			const entries = recentSessionRecords(agent.sessionPath).filter(
-				(entry): entry is Record<string, unknown> =>
-					Boolean(entry && typeof entry === "object" && (entry as Record<string, unknown>).type === "message"
-						&& sessionEntryId(entry)),
+			const entries = recentSessionRecords(agent.sessionPath).filter((entry): entry is Record<string, unknown> =>
+				Boolean(
+					entry &&
+						typeof entry === "object" &&
+						(entry as Record<string, unknown>).type === "message" &&
+						sessionEntryId(entry),
+				),
 			);
 			if (!entries.length) {
 				// An inaccessible or not-yet-complete session may still be available by RPC.
 				const snapshot = await getIncrementalMonitoringTranscript(
-					agent, this.afterEntryId, options, this.sessionCursor, this.shownRecentIds,
+					agent,
+					this.afterEntryId,
+					options,
+					this.sessionCursor,
+					this.shownRecentIds,
 				);
 				if (snapshot.nextCursor) this.afterEntryId = snapshot.nextCursor;
 				for (const id of snapshot.shownEntryIds ?? []) this.shownRecentIds.add(id);
@@ -492,8 +510,8 @@ export class IncrementalTranscriptCursor {
 			for (const entry of fresh.reverse()) {
 				if (lines.length >= maxMessages) break;
 				const message = sessionMessageFromEntry(entry);
-				const timestampMs = message && typeof message === "object"
-					? messageTimestampMs(message as Record<string, unknown>) : undefined;
+				const timestampMs =
+					message && typeof message === "object" ? messageTimestampMs(message as Record<string, unknown>) : undefined;
 				const line = formatTranscriptMessageProjection(message, perMessageChars, timestampMs);
 				if (!line) continue;
 				const cost = line.detailed.length + (lines.length ? 2 : 0);
@@ -546,7 +564,6 @@ function recentSessionRecords(sessionPath: string, maxBytes = 512 * 1024): unkno
 		if (fd !== undefined) closeSync(fd);
 	}
 }
-
 
 export function recentSessionMessages(sessionPath: string, maxBytes = 512 * 1024): unknown[] {
 	return recentSessionRecords(sessionPath, maxBytes)

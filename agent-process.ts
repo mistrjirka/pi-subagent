@@ -16,81 +16,23 @@
  */
 
 import * as path from "node:path";
+import { AgentActivityFold } from "./agent-activity-fold.js";
+import type {
+	AgentCompletion,
+	AgentProcessOptions,
+	AgentSessionEntryPage,
+	AgentStats,
+	AgentStatus,
+	TerminalStatus,
+} from "./agent-process-contracts.js";
+import { AgentSettlementLatch } from "./agent-settlement-latch.js";
 import type { AgentTreeEvent } from "./event-interpret.js";
-import { type AgentActivity, type AgentEvent, interpretEvent } from "./event-interpret.js";
+import { type AgentActivity, interpretEvent } from "./event-interpret.js";
 import type { AgentMessage, AgentQuestion, RpcCommand, RpcEvent } from "./protocol.js";
 import { RpcClient, type RpcClientOptions } from "./rpc-client.js";
 import type { RenderEvent } from "./types.js";
 
-type AgentStatus = "queued" | "running" | "completed" | "failed" | "stopped";
-
-type TerminalStatus = Exclude<AgentStatus, "queued" | "running">;
-
-interface AgentStats {
-	tokens: number;
-	outputTokens?: number;
-	contextTokens?: number;
-	toolUses: number;
-	durationMs: number;
-}
-
-export interface AgentCompletion {
-	/** Revision of the work that produced this snapshot. */
-	generation?: number;
-	status: TerminalStatus;
-	output: string;
-	stats: AgentStats;
-	sessionPath?: string;
-	sessionId?: string;
-}
-
-/** Append-ordered Pi session entries, optionally read after a stable entry id. */
-export interface AgentSessionEntryPage {
-	entries: unknown[];
-	leafId: string | null;
-}
-
-export interface AgentProcessOptions {
-	cwd: string;
-	/** Resolved "provider/id" model string, or inherit when omitted. */
-	model?: string;
-	/** Reasoning intensity ("off"…"max"), passed as --thinking. */
-	thinking?: string;
-	/** Extra role guidance appended to Pi's normal system prompt. */
-	appendSystemPrompt?: string;
-	/** Short task label (notification card). */
-	label: string;
-	/** Task preview for compaction, not a transcript or full prompt. */
-	taskSummary?: string;
-	/** Short human-readable id ("max", "zoe") assigned by the registry (name-gen.ts). */
-	agentId: string;
-	/** Custom session storage dir (--session-dir) — keeps sub-agent sessions out of `pi -r`. */
-	sessionDir?: string;
-	/** Existing session file to load instead of starting with a blank context. */
-	resumeSessionPath?: string;
-	/** Called when Pi confirms its saved session path (used for durable recovery). */
-	onSessionReady?: (sessionPath: string, sessionId?: string) => void;
-	/** Streamed assistant text deltas (rpc message_update/text_delta) — for live tool-card output. */
-	onDelta?: (delta: string) => void;
-	/** Thinking/tool activity transitions (no text delta involved) — for live tool-card rows. */
-	onActivityChange?: (activity: AgentActivity) => void;
-	/** Raw mapped stream records (thinking/text/tool_start/tool_call) — for the
-	 *  append-only `events.jsonl` tail. Fires for BOTH spawn modes; onEvent is
-	 *  mode-independent. Must never affect the fold below. */
-	onStream?: (event: AgentEvent) => void;
-	/** In-tree message received from this child (extension_ui_request under the reserved key). */
-	onMessage?: (message: AgentMessage) => void;
-	/** Structured ask_parent request from this child. */
-	onQuestion?: (question: AgentQuestion) => void;
-	/** Tree telemetry from this child's own spawns (extension_ui_request, tree key) — forward or apply. */
-	onTreeEvent?: (event: AgentTreeEvent) => void;
-	/** A woken persistent agent settled: "completed" → idle, "failed" → report + clean up. */
-	onIdle?: (outcome: "completed" | "failed", generation: number) => void;
-	/** Resident after completion (idle, zero token) — explicit opt-in, default off. */
-	persistent?: boolean;
-	/** Extra child environment (identity injection: PI_SUBAGENT_AGENT_ID / PI_SUBAGENT_PARENT). */
-	env?: NodeJS.ProcessEnv;
-}
+export type { AgentCompletion, AgentProcessOptions, AgentSessionEntryPage } from "./agent-process-contracts.js";
 
 interface AgentProcessDeps {
 	/** Test seam: override client creation (defaults to a real RpcClient). */
@@ -129,12 +71,7 @@ export class AgentProcess {
 
 	private readonly client: RpcClient;
 
-	private settleWaiters = new Set<() => void>();
-	/** Total agent_settled events seen; lets awaitSettled skip settles that
-	 *  arrived while no waiter was attached (synchronous test emit pattern). */
-	private settleCount = 0;
-	/** settleCount observed at the last awaitSettled() call. */
-	private lastSettledCount = 0;
+	private readonly settlement = new AgentSettlementLatch();
 	/** Process lifetime is independent of completed work revisions. */
 	generation = 1;
 	private closing = false;
@@ -143,10 +80,10 @@ export class AgentProcess {
 	private lastSettlement: { status: TerminalStatus; generation: number } | undefined;
 	/** Model API error captured from agent_end (stopReason "error"). */
 	private agentError: string | null = null;
+	private readonly activity: AgentActivityFold;
 	/** Latest activity excerpt for the widget. */
-	private latestActivity: AgentActivity | null = null;
+
 	/** Ordered activity stream — accumulated from RPC events at the source. */
-	private events: RenderEvent[] = [];
 
 	sessionPath?: string;
 	sessionId?: string;
@@ -158,15 +95,17 @@ export class AgentProcess {
 		this.model = options.model;
 		this.thinking = options.thinking;
 		this.persistent = options.persistent ?? false;
-		this.onDelta = options.onDelta;
-		this.onActivityChange = options.onActivityChange;
 		this.onMessage = options.onMessage;
 		this.onQuestion = options.onQuestion;
 		this.onTreeEvent = options.onTreeEvent;
 		this.onIdle = options.onIdle;
-		this.onStream = options.onStream;
 		this.onSessionReady = options.onSessionReady;
 		this.resumeSessionPath = options.resumeSessionPath;
+		this.activity = new AgentActivityFold({
+			onDelta: options.onDelta,
+			onActivityChange: options.onActivityChange,
+			onStream: options.onStream,
+		});
 
 		const args: string[] = [];
 		if (options.model) args.push("--model", options.model);
@@ -187,7 +126,7 @@ export class AgentProcess {
 				if (this.status === "running" || this.status === "queued")
 					this.status = this.stoppedByControl ? "stopped" : "failed";
 				this.lastSettlement = { status: this.status as TerminalStatus, generation: this.generation };
-				this.settle();
+				this.settlement.settle();
 			},
 		};
 		this.client = deps.createClient ? deps.createClient(clientOptions) : new RpcClient(clientOptions);
@@ -285,7 +224,7 @@ export class AgentProcess {
 			this.status = "running";
 			this.awaitingParent = false;
 			this.pendingQuestion = undefined;
-			this.lastSettledCount = this.settleCount;
+			this.settlement.ignorePrior();
 		}
 		const generation = this.generation;
 		const deliveredText = wasAwaitingParent ? `[parent answer to your pending ask_parent]\n${text}` : text;
@@ -375,7 +314,8 @@ export class AgentProcess {
 	 * task deadline, turn cap, token cap, or tool-call cap in this runtime.
 	 */
 	async waitForCompletion(): Promise<AgentCompletion> {
-		if ((this.status === "running" || this.status === "queued") && !this.client.isClosed) await this.awaitSettled();
+		if ((this.status === "running" || this.status === "queued") && !this.client.isClosed)
+			await this.settlement.waitForNext(() => this.closing || this.client.isClosed);
 		const settled = this.lastSettlement ?? {
 			status: (this.status === "stopped"
 				? "stopped"
@@ -418,7 +358,7 @@ export class AgentProcess {
 		if (this.status === "running" || this.status === "queued") {
 			this.markStopped();
 			this.lastSettlement = { status: "stopped", generation: this.generation };
-			this.settle();
+			this.settlement.settle();
 		}
 		this.stopPromise = this.closeProcess();
 		return this.stopPromise;
@@ -466,7 +406,7 @@ export class AgentProcess {
 
 	/** Latest activity excerpt for the widget (undefined until the first message_update). */
 	getLatestActivity(): AgentActivity | undefined {
-		return this.latestActivity ?? undefined;
+		return this.activity.latestActivity();
 	}
 
 	/**
@@ -476,18 +416,16 @@ export class AgentProcess {
 	 * deltas append). The stream mirrors pi's session replay order.
 	 */
 	getEvents(): RenderEvent[] {
-		return this.events;
+		return this.activity.getEvents();
 	}
 
 	// ── Internal ───────────────────────────────────────────
 
-	private readonly onDelta: ((delta: string) => void) | undefined;
-	private readonly onActivityChange: ((activity: AgentActivity) => void) | undefined;
 	private readonly onMessage: ((message: AgentMessage) => void) | undefined;
 	private readonly onQuestion: ((question: AgentQuestion) => void) | undefined;
 	private readonly onTreeEvent: ((event: AgentTreeEvent) => void) | undefined;
 	private readonly onIdle: ((outcome: "completed" | "failed", generation: number) => void) | undefined;
-	private readonly onStream: ((event: AgentEvent) => void) | undefined;
+
 	private readonly onSessionReady: ((sessionPath: string, sessionId?: string) => void) | undefined;
 	private readonly resumeSessionPath: string | undefined;
 
@@ -499,79 +437,20 @@ export class AgentProcess {
 		// thinking/tool activity push, streamed text folding, and in-tree
 		// message delivery.
 		for (const ev of interpretEvent(event)) {
+			if (this.activity.handle(ev)) continue;
 			switch (ev.type) {
 				case "settled": {
-					const followUp = this.settleCount > 0;
+					const followUp = this.settlement.count > 0;
 					const outcome = this.agentError ? "failed" : "completed";
 					if (!this.stoppedByControl && !this.closing) this.status = outcome;
 					this.lastSettlement = {
 						status: this.stoppedByControl ? "stopped" : outcome,
 						generation: this.generation,
 					};
-					this.settle();
+					this.settlement.settle();
 					if (followUp && (this.persistent || this.questionResident) && !this.stoppedByControl && !this.closing) {
 						this.onIdle?.(outcome, this.generation);
 					}
-					break;
-				}
-				case "assistant_start":
-				case "assistant_end":
-					// Stream-only message boundaries. They give external transcript
-					// readers a stable assistant-turn identity without changing the
-					// card/widget activity fold.
-					this.onStream?.(ev);
-					break;
-				case "thinking": {
-					// Preserve plaintext reasoning deltas for the human-facing card/widget.
-					// Consecutive chunks stay one event so the card grows in place rather
-					// than adding one row per token.
-					const chunk = ev.text ?? "";
-					const last = this.events[this.events.length - 1];
-					if (last?.kind === "thinking") {
-						last.text = (last.text ?? "") + chunk;
-					} else {
-						this.events.push({ kind: "thinking", text: chunk, ts: Date.now() });
-					}
-					const activity: AgentActivity = {
-						kind: "thinking",
-						text: last?.kind === "thinking" ? (last.text ?? "") : chunk,
-					};
-					this.latestActivity = activity;
-					this.onActivityChange?.(activity);
-					this.onStream?.(ev);
-					break;
-				}
-				case "tool_execution_start":
-				case "tool_execution_end":
-				case "tool_result_end":
-				case "tool_start":
-					// Stream-only: the fold waits for toolcall_end (authoritative args).
-					this.onStream?.(ev);
-					break;
-				case "tool_call": {
-					// toolcall_end is the authoritative tool call: the wire streams
-					// the name on toolcall_start and the arguments on toolcall_delta,
-					// but only the end event carries the complete call, so the earlier
-					// events are deliberately ignored. The row stays visible while the
-					// tool actually executes, mirroring the pre-v0.84 card.
-					this.events.push({ ...ev.activity, ts: Date.now() });
-					this.latestActivity = ev.activity;
-					this.onActivityChange?.(ev.activity);
-					this.onStream?.(ev);
-					break;
-				}
-				case "text_delta": {
-					// Fold consecutive text deltas into the current text event.
-					const last = this.events[this.events.length - 1];
-					if (last?.kind === "text") {
-						last.text += ev.delta;
-					} else {
-						this.events.push({ kind: "text", text: ev.delta, ts: Date.now() });
-					}
-					// Widget excerpt reflects the latest streamed text.
-					this.latestActivity = { kind: "text", text: last?.kind === "text" ? last.text : ev.delta };
-					this.onDelta?.(ev.delta);
-					this.onStream?.(ev);
 					break;
 				}
 				case "agent_failed":
@@ -591,32 +470,5 @@ export class AgentProcess {
 					break;
 			}
 		}
-	}
-
-	private settle(): void {
-		// Count-based: agent_settled fires when the child's run loop finishes —
-		// a steer re-runs the loop and settles again, so each post-steer/
-		// post-abort turn must be awaited (no one-shot latch). The count also
-		// survives settles that arrive while no waiter is attached.
-		this.settleCount++;
-		for (const waiter of this.settleWaiters) waiter();
-		this.settleWaiters.clear();
-	}
-
-	/** Wait for the next settle with no framework deadline. */
-	private awaitSettled(): Promise<void> {
-		if (this.closing || this.client.isClosed) return Promise.resolve();
-		if (this.settleCount > this.lastSettledCount) {
-			this.lastSettledCount = this.settleCount;
-			return Promise.resolve();
-		}
-		return new Promise((resolve) => {
-			const onSettle = () => {
-				this.settleWaiters.delete(onSettle);
-				this.lastSettledCount = this.settleCount;
-				resolve();
-			};
-			this.settleWaiters.add(onSettle);
-		});
 	}
 }

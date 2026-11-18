@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.5.21 — split child process and event-stream services
+
+- Extract `ChildEventWriter` from `ExternalControlBridge`, separating the bounded JSONL event stream from direct steer/stop and status I/O. Preserve the existing `events.jsonl` wire format, file permissions, byte cap, coalescing boundaries and flush behavior.
+- Extract `AgentActivityFold` for UI thinking/text/tool excerpts and `AgentSettlementLatch` for repeated persistent-child turn completions. Keep process RPC lifecycle and question delivery in `AgentProcess`.
+- Move process inputs and completion/result interfaces into `agent-process-contracts.ts`, preserving existing type exports without duplicating runtime schemas or casts.
+- `external-control.ts` reduced from 551 to 336 lines; `agent-process.ts` reduced from 622 to 474 lines. Add service-level tests for callback order, folding, delivery, parallel settlement and persistent-child revision semantics.
+
+Validation: 417 tests passed; TypeScript and Biome passed. No child execution, notification or recovery semantics were changed.
+
 ## 0.5.20 — isolate child wait subscriptions
 
 - Extract `AgentWaitCoordinator` from `AgentRegistry`. It owns explicit `agent_wait` subscriptions, parallel completion/message coalescing, timeout/abort cleanup and shutdown unblocking.

@@ -23,6 +23,7 @@
 import type { WidgetResult } from "@everyx/pi-ui/widget.js";
 import { AgentNameAllocator } from "./agent-name-allocator.js";
 import type { AgentCompletion } from "./agent-process.js";
+import { AgentWaitCoordinator } from "./agent-wait-coordinator.js";
 import { DiagnosticDeduplicator } from "./diagnostic-dedup.js";
 import { type AgentMessage, type AgentQuestion, type RouteDecision, routeMessage } from "./protocol.js";
 import type { PendingAnnouncement } from "./registry-contracts.js";
@@ -60,12 +61,7 @@ export class AgentRegistry {
 	private readonly hasParent: boolean;
 	/** Latest settled turn for each id; retained so agent_wait can arrive after completion. */
 	private readonly settlements = new Map<string, AgentSettlement>();
-	private readonly settlementWaiters = new Map<
-		string,
-		Set<(settlement: AgentSettlement | AgentWaitEvent | null | undefined) => void>
-	>();
-	/** Only explicit agent_wait calls subscribe. Child messages wake them without a duplicate steer. */
-	private readonly messageWaiters = new Set<(message: AgentWaitEvent) => void>();
+	private readonly waits: AgentWaitCoordinator;
 	/**
 	 * Completion/question announcements that settled during an active parent turn.
 	 * They are flushed at the next completed tool/model boundary, unless a
@@ -94,6 +90,7 @@ export class AgentRegistry {
 			remind: deps.remind ?? (() => {}),
 			intervalMs: deps.supervisionIntervalMs ?? 180_000,
 		});
+		this.waits = new AgentWaitCoordinator(this.supervision);
 		this.getWidget = deps.getWidget ?? (() => null);
 		this.hasParent = deps.hasParent ?? false;
 		const seeds = deps.seedNames ?? parseAncestorIds(process.env[ANCESTOR_IDS_ENV]);
@@ -232,16 +229,7 @@ export class AgentRegistry {
 		// A new settlement supersedes any unannounced result from an earlier turn.
 		this.pendingAnnouncements.delete(agentId);
 		this.settlements.set(agentId, settlement);
-		const waiters = this.settlementWaiters.get(agentId);
-		if (waiters?.size) {
-			this.settlementWaiters.delete(agentId);
-			let first = true;
-			for (const resolve of [...waiters]) {
-				resolve(first ? settlement : { kind: "other_wait", reason: "completion" });
-				first = false;
-			}
-			return true;
-		}
+		if (this.waits.settle(agentId, settlement)) return true;
 		if (announce) {
 			if (settlement.waitingForParent && settlement.question) {
 				// ask_parent must reach the next model boundary, not wait for the
@@ -262,15 +250,8 @@ export class AgentRegistry {
 	 * Outside a wait, the existing pi.sendMessage path remains authoritative.
 	 */
 	wakeWaitForMessage(message: AgentMessage): boolean {
-		if (this.closing || this.messageWaiters.size === 0) return false;
-		const event: AgentWaitMessage = { kind: "message", message };
+		if (this.closing || !this.waits.wakeForMessage(message)) return false;
 		this.noteDeliveredParentMessage(message);
-		// Wake the full tool batch, but include this payload in only one result.
-		let first = true;
-		for (const wake of [...this.messageWaiters]) {
-			wake(first ? event : { kind: "other_wait", reason: "message" });
-			first = false;
-		}
 		return true;
 	}
 
@@ -318,53 +299,13 @@ export class AgentRegistry {
 	): Promise<AgentSettlement | AgentWaitEvent | null | undefined> {
 		const cached = this.consumeSettlement(agentId);
 		if (cached) {
-			// The parent explicitly consumed this already-settled turn. If its
-			// completion/question announcement was deferred during the active turn,
-			// suppress it instead of delivering the same result again afterward.
+			// A cached result consumed by agent_wait suppresses its queued
+			// asynchronous notification.
 			this.pendingAnnouncements.delete(agentId);
 			return cached;
 		}
 		if (!this.agents.has(agentId)) return undefined;
-		if (signal?.aborted) throw new Error("agent_wait cancelled");
-		if (timeoutMs !== undefined && (!Number.isFinite(timeoutMs) || timeoutMs < 0)) {
-			throw new Error("agent_wait timeout must be a finite non-negative duration");
-		}
-		this.supervision.pause(agentId);
-		if (timeoutMs === 0) {
-			this.supervision.resume(agentId);
-			return null;
-		}
-		return await new Promise<AgentSettlement | AgentWaitEvent | null | undefined>((resolve, reject) => {
-			const waiters =
-				this.settlementWaiters.get(agentId) ??
-				new Set<(event: AgentSettlement | AgentWaitEvent | null | undefined) => void>();
-			let timer: ReturnType<typeof setTimeout> | undefined;
-			const detachWaiter = () => {
-				waiters.delete(finish);
-				if (waiters.size === 0) this.settlementWaiters.delete(agentId);
-			};
-			const cleanup = () => {
-				detachWaiter();
-				this.messageWaiters.delete(wake);
-				signal?.removeEventListener("abort", onAbort);
-				if (timer) clearTimeout(timer);
-				this.supervision.resume(agentId);
-			};
-			const finish = (event: AgentSettlement | AgentWaitEvent | null | undefined) => {
-				cleanup();
-				resolve(event);
-			};
-			const wake = (message: AgentWaitEvent) => finish(message);
-			const onAbort = () => {
-				cleanup();
-				reject(new Error("agent_wait cancelled"));
-			};
-			waiters.add(finish);
-			this.settlementWaiters.set(agentId, waiters);
-			if (wakeOnMessage) this.messageWaiters.add(wake);
-			signal?.addEventListener("abort", onAbort, { once: true });
-			if (timeoutMs !== undefined) timer = setTimeout(() => finish(null), timeoutMs);
-		});
+		return await this.waits.wait(agentId, signal, timeoutMs, wakeOnMessage);
 	}
 
 	/** A successful steer/answer starts a new turn, so future waits must observe the next settlement. */
@@ -497,8 +438,7 @@ export class AgentRegistry {
 			agent.markStopped();
 			this.supervision.stop(agent.agentId);
 		}
-		for (const waiters of this.settlementWaiters.values()) for (const resolve of waiters) resolve(undefined);
-		this.settlementWaiters.clear();
+		this.waits.shutdown();
 		this.pendingAnnouncements.clear();
 		this.pendingParentMessages.length = 0;
 		this.deliveredParentProgress.clear();

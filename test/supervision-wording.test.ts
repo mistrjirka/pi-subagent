@@ -3,8 +3,10 @@ import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 
 const indexSource = readFileSync(new URL("../index.ts", import.meta.url), "utf8");
+const parentDeliverySource = readFileSync(new URL("../parent-delivery.ts", import.meta.url), "utf8");
+const supervisionReminderSource = readFileSync(new URL("../supervision-reminder.ts", import.meta.url), "utf8");
 const monitoringSource = readFileSync(new URL("../monitoring-tools.ts", import.meta.url), "utf8");
-const toolSource = indexSource + "\n" + monitoringSource;
+const toolSource = `${indexSource}\n${monitoringSource}\n${parentDeliverySource}\n${supervisionReminderSource}`;
 const readmeSource = readFileSync(new URL("../README.md", import.meta.url), "utf8");
 
 describe("supervision wording stays plain", () => {
@@ -47,8 +49,11 @@ describe("supervision wording stays plain", () => {
 	});
 
 	it("keeps the supervision mechanism facts intact", () => {
-		assert.ok(indexSource.includes('"subagent-supervision"'), "reminder customType changed");
-		assert.ok(indexSource.includes("normally a 150-second window"), "reminder lost the 150-second cadence");
+		assert.ok(supervisionReminderSource.includes('"subagent-supervision"'), "reminder customType changed");
+		assert.ok(
+			supervisionReminderSource.includes("normally a 150-second window"),
+			"reminder lost the 150-second cadence",
+		);
 		assert.ok(toolSource.includes("unread transcript page"), "guidelines lost unread transcript paging");
 		assert.ok(toolSource.includes("180-second supervision window"), "guidelines lost the 180-second default");
 		assert.ok(readmeSource.includes("180-second default"), "README lost the 180-second default");
@@ -56,13 +61,13 @@ describe("supervision wording stays plain", () => {
 	});
 
 	it("delivers pending updates through a tool result or the idle fallback", () => {
-		assert.ok(indexSource.includes('pi.on("turn_end", () => {'));
-		assert.ok(indexSource.includes('pi.on("tool_result", (event) => {'));
-		assert.ok(indexSource.includes("registry.takePendingForToolResult()"));
-		assert.ok(indexSource.includes('pi.on("agent_settled", () => {'));
-		assert.ok(indexSource.includes("registry.parentBecameIdle()"));
-		assert.ok(!indexSource.includes('pi.on("agent_end", () => registry.parentBecameIdle())'));
-		assert.ok(indexSource.includes("current !== agent"), "stale reminder re-check missing");
+		assert.ok(parentDeliverySource.includes('pi.on("turn_end", () => {'));
+		assert.ok(parentDeliverySource.includes('pi.on("tool_result", (event) => {'));
+		assert.ok(parentDeliverySource.includes("registry.takePendingForToolResult()"));
+		assert.ok(parentDeliverySource.includes('pi.on("agent_settled", () => {'));
+		assert.ok(parentDeliverySource.includes("registry.parentBecameIdle()"));
+		assert.ok(!parentDeliverySource.includes('pi.on("agent_end", () => registry.parentBecameIdle())'));
+		assert.ok(supervisionReminderSource.includes("current !== agent"), "stale reminder re-check missing");
 	});
 
 	it("records resumed child completion before normal cleanup", () => {

@@ -95,7 +95,7 @@ describe("completion notifications after parent-visible progress", () => {
 	});
 
 	it("the real agent_settled hook marks delivered progress before the idle fallback", () => {
-		const source = readFileSync(new URL("../index.ts", import.meta.url), "utf8");
+		const source = readFileSync(new URL("../parent-delivery.ts", import.meta.url), "utf8");
 		const start = source.indexOf('pi.on("agent_settled", () => {');
 		const end = source.indexOf("\n\t});", start);
 		assert.ok(start >= 0 && end > start);

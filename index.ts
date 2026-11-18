@@ -1,4 +1,7 @@
-import { reportedAgentState } from "./agent-state.js";
+import { registerDiscoveryTools } from "./discovery-tools.js";
+import { registerParentDeliveryHooks, registerToolErrorHook } from "./parent-delivery.js";
+import { activitySummary, createSupervisionReminder } from "./supervision-reminder.js";
+import { createTreeTelemetry } from "./tree-telemetry.js";
 /**
  * pi-subagent — spawn isolated sub‑agent pi instances + in-tree messaging.
  *
@@ -37,7 +40,6 @@ import { randomUUID } from "node:crypto";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { ExtensionAPI, ExtensionUIContext } from "@earendil-works/pi-coding-agent";
-import { Type } from "typebox";
 import { registerControlTools } from "./control-tools.js";
 import { MessageRouter } from "./message-router.js";
 import { buildSpawnParamsSchema, canDelegate, type SpawnParams } from "./tool-params.js";
@@ -45,20 +47,20 @@ import { buildSpawnParamsSchema, canDelegate, type SpawnParams } from "./tool-pa
 export { buildSpawnParamsSchema, canDelegate, shouldRunInBackground } from "./tool-params.js";
 
 import { AgentProcess } from "./agent-process.js";
-import { type AgentActivity, type AgentTreeEvent, TREE_STATUS_KEY } from "./event-interpret.js";
+import type { AgentActivity } from "./event-interpret.js";
 import { ExternalControlBridge } from "./external-control.js";
 import { createLiveChannels } from "./live-output.js";
 import { registerMonitoringTools } from "./monitoring-tools.js";
-import { completionContextContent, notifyCompletion } from "./notification.js";
+import { notifyCompletion } from "./notification.js";
 import { discoverAgentProfiles, parseAllowedSubagentsEnv } from "./profiles.js";
-import { type AgentMessage, type AgentQuestion, formatParentMessage } from "./protocol.js";
+import type { AgentMessage, AgentQuestion } from "./protocol.js";
 import { RecoveryStore } from "./recovery.js";
 import { AgentRegistry, buildAncestorChain, type RegisteredAgent, type WidgetSurface } from "./registry.js";
 import { renderNotification } from "./render.js";
 import { SpawnCoordinator } from "./spawn-coordinator.js";
 import { presentBackgroundSpawn, presentFinishedSpawn, type SpawnPresentationContext } from "./spawn-result.js";
 import { runSpawnSession, type SpawnOutcome } from "./spawn-session.js";
-import { getMonitoringTranscript, IncrementalTranscriptCursor } from "./transcript.js";
+import { IncrementalTranscriptCursor } from "./transcript.js";
 import { createSubtreeDisplay } from "./tree-display.js";
 import type { SubagentDetails } from "./types.js";
 import { spawnView } from "./views.js";
@@ -143,72 +145,11 @@ function widgetSurface(): WidgetSurface | null {
 
 // ─── Tool parameter schemas ──────────────────────────────
 
-/**
- * Tree telemetry (nested agents): a sub-agent's own spawns are invisible to
- * the user — the only TUI is the root session's. Every node reports ALL its
- * spawns upward (foreground and background alike) over the same setStatus
- * transport as @parent messages; intermediate nodes forward verbatim
- * (depth + 1). Consumption is decided at the anchor boundary — the execute
- * that owns the visible surface:
- *   • root + background child → widget rows (indent = depth)
- *   • root + foreground child → folded into that card's nested meta counters
- * A foreground card's subtree therefore never reaches the widget, and a
- * background row's subtree never leaks into a card — one subtree, one
- * surface (SPEC: 显示面统一规则).
- */
-function createTreeTelemetry(hasParent: boolean) {
-	/** Ids reported as added — guards activity/remove so unknown ids never
-	 *  emit telemetry. */
-	const tracked = new Set<string>();
-	const report = (event: AgentTreeEvent) => uiRef?.setStatus(TREE_STATUS_KEY, JSON.stringify(event));
-	return {
-		report,
-		add(agent: { agentId: string; label: string; startedAt: number }, status: "running" | "idle"): void {
-			if (!hasParent) return;
-			tracked.add(agent.agentId);
-			// `parent` is my own id: I am the direct parent of every child I spawn.
-			// Forwarding nodes pass the event through verbatim, so the link stays
-			// anchored at the real parent however deep the chain runs.
-			report({
-				op: "add",
-				id: agent.agentId,
-				label: agent.label,
-				startedAt: agent.startedAt,
-				depth: 1,
-				status,
-				parent: MY_AGENT_ID,
-			});
-		},
-		activity(agent: { agentId: string; getLatestActivity(): AgentActivity | undefined }): void {
-			if (!tracked.has(agent.agentId)) return;
-			const activity = agent.getLatestActivity();
-			if (!activity) return;
-			report({ op: "activity", id: agent.agentId, activity });
-		},
-		remove(agentId: string, status: "done" | "failed" | "stopped"): void {
-			if (!tracked.delete(agentId)) return;
-			report({ op: "remove", id: agentId, status });
-		},
-	};
-}
-
 const SpawnParamsSchema = buildSpawnParamsSchema(HAS_PARENT);
 
 // ─── Helpers ─────────────────────────────────────────────────
 
 const SUPERVISION_REMINDER_MS = 180_000;
-
-function activitySummary(activity: AgentActivity | undefined): string {
-	if (!activity) return "no recent activity reported";
-	if (activity.kind === "thinking") return "thinking";
-	if (activity.kind === "tool") {
-		const args = activity.args.replace(/\s+/g, " ").trim();
-		const excerpt = Array.from(args).slice(0, 180).join("");
-		return `${activity.name}${excerpt ? ` — ${excerpt}${Array.from(args).length > 180 ? "…" : ""}` : ""}`;
-	}
-	const text = activity.text.replace(/\s+/g, " ").trim();
-	return text ? `writing — ${Array.from(text).slice(-180).join("")}` : "writing";
-}
 
 function toErrorResult(err: unknown): {
 	content: { type: "text"; text: string }[];
@@ -238,28 +179,7 @@ function spawnErrorResult(
 // ─── Default export (pi extension entry) ───────────────────────
 
 export default function (pi: ExtensionAPI) {
-	// pi's agent-core drops the execute() isError flag when a tool returns
-	// normally (bash gets its error background by throwing instead) — see
-	// agent-core executePreparedToolCall. Re-attach it for our tools by
-	// marking every error path in `details.error`; the handler restores
-	// isError so failed calls render with toolErrorBg like bash, while
-	// keeping the details (status line) intact.
-	pi.on("tool_result", async (event) => {
-		if (
-			event.toolName !== "agent_recover" &&
-			event.toolName !== "agent_spawn" &&
-			event.toolName !== "agent_wait" &&
-			event.toolName !== "agent_inspect" &&
-			event.toolName !== "agent_stop" &&
-			event.toolName !== "agent_send" &&
-			event.toolName !== "ask_parent"
-		) {
-			return undefined;
-		}
-		const details = event.details as { error?: unknown } | undefined;
-		if (!details || details.error === undefined) return undefined;
-		return { isError: true };
-	});
+	registerToolErrorHook(pi);
 
 	// One shared transcript reader per direct child. Wait prioritizes new progress;
 	// inspect backfills older unread history. Delivered entries are not repeated.
@@ -284,45 +204,7 @@ export default function (pi: ExtensionAPI) {
 		notify: (agent, completion, delivery) => notifyCompletion(pi, agent, completion, delivery),
 		...(!HAS_PARENT
 			? {
-					remind: async (agent: Parameters<typeof notifyCompletion>[1], unsupervisedMs: number) => {
-						const minutes = Math.max(1, Math.round(unsupervisedMs / 60_000));
-						const activity = activitySummary(agent.getLatestActivity?.());
-						const transcript = await getMonitoringTranscript(agent, {
-							maxMessages: 4,
-							maxChars: 4_000,
-							perMessageChars: 1_000,
-						});
-						// Transcript collection is asynchronous. The child may settle while
-						// it is in flight; do not emit a stale "still running" reminder.
-						const current = registry.lookup(agent.agentId);
-						if (current !== agent || (current.status && current.status !== "running" && current.status !== "queued")) {
-							return;
-						}
-						pi.sendMessage(
-							{
-								customType: "subagent-supervision",
-								content:
-									`Subagent @${agent.agentId} has been running unsupervised for about ${minutes} minute${minutes === 1 ? "" : "s"}. ` +
-									`Latest activity: ${activity}. ` +
-									"SUPERVISION CHECK REQUIRED: compare new evidence with the assigned scope and last correction. Is the child making real progress? " +
-									"If progress remains aligned, continue with agent_wait (normally a 150-second window) without reassurance messages, document updates, or repeated audits. " +
-									"Inspect or steer with agent_send for a concrete blocker, scope drift, repeated failure, or necessary coordination. Stop the child when needed. " +
-									"A timeout or long-running command alone is not a stall. Use agent_wait for subagents rather than shell polling. Ordinary external processes may use process/job waits." +
-									`\n\nRecent transcript (${transcript.source}):\n${transcript.text}`,
-								display: true,
-								details: {
-									agentId: agent.agentId,
-									label: agent.label,
-									state: reportedAgentState(agent),
-									activity: agent.getLatestActivity?.(),
-									transcript: transcript.text,
-									transcriptSource: transcript.source,
-									unsupervisedMs,
-								},
-							},
-							{ deliverAs: "followUp", triggerTurn: true },
-						);
-					},
+					remind: createSupervisionReminder(pi, (agentId) => registry.lookup(agentId)),
 					supervisionIntervalMs: SUPERVISION_REMINDER_MS,
 				}
 			: {}),
@@ -354,52 +236,7 @@ export default function (pi: ExtensionAPI) {
 		parentAgentId: MY_AGENT_ID,
 		...(recovery ? { recovery } : {}),
 	});
-	// Every Pi session can own a resident child, even though only the root may
-	// spawn background work. Track the parent's actual active/settled window at
-	// every depth so resumed-child announcements cannot race a late agent_wait.
-	pi.on("agent_start", () => registry.parentBecameActive());
-	// If progress arrives after the last tool result, steer it at the next
-	// model-turn boundary rather than holding it until the parent fully settles.
-	// Completions remain deferred, because agent_wait may still consume them.
-	pi.on("turn_end", () => {
-		for (const message of registry.takePendingParentMessages()) {
-			router.deliverParentMessage(message);
-			registry.noteDeliveredParentMessage(message);
-		}
-	});
-	// Do not announce at turn_end: Pi queues the steer immediately, but a later
-	// agent_wait can consume the same result before that steer reaches the model.
-	// A tool result reports earlier completions; idle is the fallback boundary.
-	pi.on("agent_settled", () => {
-		const messages = registry.takePendingParentMessages();
-		// Pi can settle without emitting another turn_end. Publish and account
-		// for pending child progress *before* checking whether the completion
-		// needs a new parent turn. Otherwise idle sends the completion first
-		// and starts a redundant model request before the progress is counted.
-		for (const message of messages) {
-			router.deliverParentMessage(message);
-			registry.noteDeliveredParentMessage(message);
-		}
-		registry.parentBecameIdle();
-	});
-
-	// A tool result is the next safe model-visible boundary during an active turn.
-	// Consume once, while preserving the original tool output and error flag.
-	pi.on("tool_result", (event) => {
-		const { messages, completions } = registry.takePendingForToolResult();
-		if (!messages.length && !completions.length) return undefined;
-		const text = [
-			"[Subagent updates received during this turn]",
-			...messages.map((message) => `Message: ${formatParentMessage(message)}`),
-			...completions.map(({ agent, completion }) => `Completion: ${completionContextContent(agent, completion)}`),
-		].join("\n");
-		return {
-			content: [...event.content, { type: "text", text }],
-			details: event.details,
-			isError: event.isError,
-			usage: event.usage,
-		};
-	});
+	registerParentDeliveryHooks(pi, registry, router);
 
 	// Inbound messages (a child addresses @parent, forwards a sibling's
 	// message, or reports an unroutable target) land here from its rpc event
@@ -411,7 +248,7 @@ export default function (pi: ExtensionAPI) {
 	// Tree telemetry for this node's own children (up-report) and forwarding
 	// of deeper events. Lives at extension scope: the tracked-set must span
 	// executes (a background child reports activity long after its execute returned).
-	const tree = createTreeTelemetry(HAS_PARENT);
+	const tree = createTreeTelemetry(HAS_PARENT, MY_AGENT_ID, (key, value) => uiRef?.setStatus(key, value));
 	const startupProfiles = discoverAgentProfiles(process.cwd());
 	const spawnableProfiles = HAS_PARENT
 		? ALLOWED_SUBAGENTS.map((name) => startupProfiles.profiles.get(name)).filter((p) => p !== undefined)
@@ -422,68 +259,7 @@ export default function (pi: ExtensionAPI) {
 				.join("; ")
 		: "none";
 
-	// Context compaction replaces the parent's textual history, not the live
-	// in-process children. Expose their current names without reading transcripts
-	// so a compacted parent can rediscover them instead of spawning duplicates.
-	pi.registerTool({
-		name: "agent_list",
-		label: "List Direct Agents",
-		description:
-			"Read-only list of running, waiting, resident/idle and recently finished direct child agents in this Pi process. Use after compaction or when an agent id is uncertain. After a Pi restart use agent_recover for saved persistent sessions instead.",
-		promptSnippet: "Rediscover current direct child agents and their states after context compaction",
-		parameters: Type.Object({ limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })) }),
-		async execute(_callId, raw) {
-			const requested = (raw as { limit?: number }).limit;
-			const limit =
-				typeof requested === "number" && Number.isSafeInteger(requested) ? Math.max(1, Math.min(100, requested)) : 20;
-			return {
-				content: [{ type: "text", text: registry.describeMessageTargets("", limit) }],
-				details: { limit },
-			};
-		},
-	});
-
-	if (recovery) {
-		pi.registerTool({
-			name: "agent_recover",
-			label: "Recover Agent Context",
-			description:
-				"List previous persistent subagent transcripts that can be resumed in the current project and Git branch. Read-only; never starts a child. To continue one, pass its recovery id to agent_spawn.resume_id with a fresh scoped prompt.",
-			promptSnippet: "Find recoverable persistent child contexts after a Pi restart",
-			promptGuidelines: [
-				"Check recoverable agents when resuming substantial implementation after a Pi restart, before assigning fresh exploration.",
-				"Reuse only when the role, project, Git branch, and task acceptance boundary still match. An old transcript is context, not proof that its changes still exist.",
-				"Do not resume a worker already active in another Pi process. Supply the fresh goal, changed requirements and current code state as the new spawn prompt.",
-			],
-			parameters: Type.Object({ limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })) }),
-			async execute(_callId, raw, _signal, _onUpdate, ctx) {
-				try {
-					const matches = recovery.list(ctx.cwd, (raw as { limit?: number }).limit ?? 20);
-					const text = matches.length
-						? matches
-								.map(
-									({ record, available }) =>
-										`${record.id} — ${record.profile} (${record.label}), ${available ? "recoverable" : "active elsewhere"}, ${record.updatedAt}, model ${record.model}`,
-								)
-								.join("\n")
-						: "No recorded persistent agent contexts for this project and Git branch.";
-					return {
-						content: [
-							{
-								type: "text",
-								text:
-									text +
-									"\nTo resume: agent_spawn({agent: <role>, resume_id: <id>, persistent: true, prompt: <fresh instructions>}).",
-							},
-						],
-						details: { count: matches.length },
-					};
-				} catch (error) {
-					return toErrorResult(error);
-				}
-			},
-		});
-	}
+	registerDiscoveryTools(pi, { registry, recovery, toErrorResult });
 
 	if (canDelegate(HAS_PARENT, ALLOWED_SUBAGENTS)) {
 		// ── agent_spawn ────────────────────────────────────

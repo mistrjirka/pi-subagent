@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.5.24 — further split entrypoint lifecycle and recovery
+
+- Move read-only `agent_list` and `agent_recover` registration to `discovery-tools.ts`, deriving argument types from one TypeBox schema rather than casting decoded input.
+- Move parent `tool_result`, `turn_end`, and `agent_settled` delivery hooks into `parent-delivery.ts`. Preserve the v0.5.18 Rona no-duplicate completion policy, progress receipts and `ask_parent` behavior.
+- Move tree telemetry and bounded supervision reminders into dedicated modules. Keep the current parent-child identity, status key, and stale reminder check.
+- Reduce `index.ts` from 976 to 753 lines, without modifying spawn execution, recovery leases or running sessions.
+- Add focused direct-agent discovery and nested-tree telemetry tests. Update source-level regression checks for the extracted modules.
+
+Validation: 432 tests, TypeScript and Biome checks passed.
+
 ## 0.5.23 — extract control tools and message routing
 
 - Move `agent_stop`, `agent_send`, and `ask_parent` registration into `control-tools.ts`, with typed ports for registry, parent status, recovery retirement and tree updates.

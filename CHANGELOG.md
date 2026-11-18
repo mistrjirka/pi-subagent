@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.19 — split child-registry supervision and projections
+
+- Extract fallback supervision timers and parent-active/idle scheduling into `SupervisionService`.
+- Extract unique child-name allocation, diagnostic deduplication, shared registry contracts, and pure active-roster/error projections into separate typed modules.
+- Preserve v0.5.18's parent delivery receipts and `triggerTurn` policy. No notification ordering or process lifecycle changes.
+- Add focused tests for supervision pauses, unique names, diagnostic expiry and registry projections.
+
 ## 0.5.18 — prevent redundant parent turns after child progress
 
 - A normal child completion that follows a parent-visible `agent_send` update from the same child is still displayed and saved, but uses `triggerTurn: false` so it does not start a second parent model request after the answer. This specifically addresses the late Rona progress/completion sequence in SBHG Buddy.

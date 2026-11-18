@@ -21,155 +21,37 @@
  */
 
 import type { WidgetResult } from "@everyx/pi-ui/widget.js";
+import { AgentNameAllocator } from "./agent-name-allocator.js";
 import type { AgentCompletion } from "./agent-process.js";
-import type { AgentActivity } from "./event-interpret.js";
-import { randomAgentName } from "./name-gen.js";
+import { DiagnosticDeduplicator } from "./diagnostic-dedup.js";
 import { type AgentMessage, type AgentQuestion, type RouteDecision, routeMessage } from "./protocol.js";
-import type { RenderEvent } from "./types.js";
+import type { PendingAnnouncement } from "./registry-contracts.js";
+import {
+	type AgentRegistryDeps,
+	type AgentSettlement,
+	type AgentWaitEvent,
+	type AgentWaitMessage,
+	ANCESTOR_IDS_ENV,
+	parseAncestorIds,
+	type RegisteredAgent,
+	type WidgetSurface,
+} from "./registry-contracts.js";
+import { checkpointRoster, describeMessageTargets } from "./registry-roster.js";
+import { SupervisionService } from "./supervision.js";
 
-/** Narrow agent surface the registry needs — AgentProcess satisfies it. */
-export interface RegisteredAgent {
-	readonly agentId: string;
-	readonly label: string;
-	readonly taskSummary?: string;
-	readonly model?: string;
-	readonly thinking?: string;
-	readonly startedAt?: number;
-	readonly generation?: number;
-	readonly awaitingParent?: boolean;
-	status?: "queued" | "running" | "completed" | "failed" | "stopped";
-	/** Resident after completion (idle) — explicit opt-in; complete() keeps it. */
-	readonly persistent?: boolean;
-	/** Runtime residency can also be activated by ask_parent. */
-	readonly shouldStayResident?: boolean;
-	/** Latest live activity used by wait-timeout/supervision snapshots. */
-	getLatestActivity?: () => AgentActivity | undefined;
-	/** Actual live Pi conversation messages for transcript inspection. */
-	getMessages?: () => Promise<unknown[]>;
-	/** Append-ordered Pi session entries; `since` is a stable entry id cursor. */
-	getEntries?: (since?: string) => Promise<{ entries: unknown[]; leafId: string | null }>;
-	/** In-memory event trace fallback when RPC/persisted session inspection is unavailable. */
-	getEvents?: () => RenderEvent[];
-	/** Persisted child session file, when available. */
-	readonly sessionPath?: string;
-	/** Deliver one in-tree message to this agent (AgentProcess.sendMessage). */
-	sendMessage?: (text: string) => Promise<boolean>;
-	stoppedByControl: boolean;
-	stop(): Promise<void>;
-	/** Record an explicit user stop as terminal (AgentProcess.markStopped):
-	 *  idempotent, flags the stop as user-controlled, never overwrites failed. */
-	markStopped(): void;
-}
-
-export interface AgentSettlement {
-	completion: AgentCompletion;
-	/** Already included in a parent tool result, so agent_wait must not repeat it. */
-	deliveredInToolResult?: boolean;
-	waitingForParent?: boolean;
-	question?: AgentQuestion;
-	/** Question already sent to Pi's steering queue; agent_wait must not repeat it. */
-	questionAnnounced?: boolean;
-}
-
-/** An ordinary child message interrupts agent_wait without settling the child. */
-export interface AgentWaitMessage {
-	kind: "message";
-	message: AgentMessage;
-}
-
-/** The other parallel waiters resume without repeating one child's payload. */
-export interface AgentWaitCoalesced {
-	kind: "other_wait";
-	reason: "message" | "completion";
-}
-export type AgentWaitEvent = AgentWaitMessage | AgentWaitCoalesced;
-
-/** Narrow widget surface — index.ts adapts the TUI AgentWidget to it. */
-export interface WidgetSurface {
-	/** `status` = the row's lifecycle state at registration (background settle = running;
-	 *  foreground resident = idle — never a terminal status: the widget's terminal
-	 *  cleanup removes such rows immediately). */
-	add(agent: RegisteredAgent, status?: "running" | "idle"): void;
-	/** `result` feeds the widget's lifetime progress meta; undefined = unknown. */
-	remove(agentId: string, result?: WidgetResult): void;
-	/** In-place status update (idle ⇄ running for persistent agents). */
-	setStatus?(agentId: string, status: "idle" | "running"): void;
-	dispose(): void;
-}
-
-interface AgentRegistryDeps {
-	/** Deliver a completion notification. A passive delivery displays the
-	 * completed result and appends it to future context without waking the LLM. */
-	notify: (
-		agent: RegisteredAgent,
-		completion: AgentCompletion,
-		delivery: { triggerTurn: boolean },
-	) => Promise<void> | void;
-	/** Fallback supervision reminder for a child left running without an active wait/steer. */
-	remind?: (agent: RegisteredAgent, unsupervisedMs: number) => Promise<void> | void;
-	/** Default 3 minutes. Set <= 0 to disable reminders. */
-	supervisionIntervalMs?: number;
-	/** Lazy widget access — null in non-TUI modes. */
-	getWidget?: () => WidgetSurface | null;
-	/** This process is itself a child agent ("@parent" is deliverable upward). */
-	hasParent?: boolean;
-	/**
-	 * Ancestor/cousin names the child's own spawns must never re-roll
-	 * (cross-process collision guard — see ANCESTOR_IDS_ENV). When omitted,
-	 * the constructor falls back to parsing the env var itself, so a child
-	 * process spawned with the chain is seeded with no extra wiring.
-	 */
-	seedNames?: readonly string[];
-}
-
-/**
- * Env var carrying the comma-separated ancestor id chain to a child process
- * (own id first, then ancestors up to the root). Seeded into the child's
- * registry so `nextAgentId` can never re-roll an ancestor/cousin name —
- * consumers rendering the whole tree keyed by bare id (PiTTy does) would
- * otherwise see two different agents under one id.
- */
-export const ANCESTOR_IDS_ENV = "PI_SUBAGENT_ANCESTOR_IDS";
-
-/** Single id charset: the name-gen pool is lowercase alpha (see name-gen.ts). */
-const ANCESTOR_ID_PATTERN = /^[a-z]{1,64}$/;
-
-/**
- * Parse an ancestor-chain env value into validated ids (deduped, order
- * preserved). Malformed entries are dropped; absent/malformed input yields
- * [] — today's behavior exactly (no seeding).
- */
-export function parseAncestorIds(raw: string | undefined | null): string[] {
-	if (!raw) return [];
-	const seen = new Set<string>();
-	for (const part of raw.split(",")) {
-		const id = part.trim();
-		if (!ANCESTOR_ID_PATTERN.test(id) || seen.has(id)) continue;
-		seen.add(id);
-	}
-	return [...seen];
-}
-
-/**
- * Build the chain value a spawner passes to its child: the child's own id
- * first, then this process's id (when it has one — "" = root session),
- * then the chain inherited from our own parent. Deduped, order preserved.
- */
-export function buildAncestorChain(newId: string, ownId: string, inheritedRaw: string | undefined): string {
-	const seen = new Set<string>();
-	const chain: string[] = [];
-	for (const id of [newId, ownId, ...parseAncestorIds(inheritedRaw)]) {
-		if (!id || !ANCESTOR_ID_PATTERN.test(id) || seen.has(id)) continue;
-		seen.add(id);
-		chain.push(id);
-	}
-	return chain.join(",");
-}
-
-interface PendingAnnouncement {
-	announce: () => Promise<void> | void;
-	inline?: { agent: RegisteredAgent; completion: AgentCompletion };
-}
+export type {
+	AgentSettlement,
+	AgentWaitCoalesced,
+	AgentWaitEvent,
+	AgentWaitMessage,
+	RegisteredAgent,
+	WidgetSurface,
+} from "./registry-contracts.js";
+export {
+	ANCESTOR_IDS_ENV,
+	buildAncestorChain,
+	parseAncestorIds,
+} from "./registry-contracts.js";
 
 export class AgentRegistry {
 	private readonly agents = new Map<string, RegisteredAgent>();
@@ -193,51 +75,34 @@ export class AgentRegistry {
 	private readonly pendingAnnouncements = new Map<string, PendingAnnouncement>();
 	/** Progress received while the parent was actively running. */
 	private readonly pendingParentMessages: AgentMessage[] = [];
-	/** A child already spoke to the parent during its current task. Its later
-	 * completion should be displayed and saved without starting another turn. */
+	/** Child progress already delivered to the parent this task. A later
+	 * completion must remain visible but must not wake the model twice. */
 	private readonly deliveredParentProgress = new Set<string>();
-	private readonly remind: NonNullable<AgentRegistryDeps["remind"]>;
-	private readonly supervisionIntervalMs: number;
-	private readonly supervisionTimers = new Map<string, ReturnType<typeof setTimeout>>();
-	private readonly supervisedAgents = new Set<string>();
+	private readonly supervision: SupervisionService;
 	private parentActive = true;
 	private closing = false;
 	private shutdownPromise: Promise<void> | undefined;
 	private readonly stoppedIds = new Set<string>();
-	private readonly activeWaits = new Map<string, number>();
-	private readonly lastSupervisedAt = new Map<string, number>();
 	/** Names handed out this session — re-roll on collision (pool ~200). */
-	private readonly usedNames = new Set<string>();
-	/** Recent successful diagnostic sends; normal instructions and urgent sends are never filtered. */
-	private readonly recentDiagnostics = new Map<string, number>();
+	private readonly names: AgentNameAllocator;
+	private readonly diagnosticDedup = new DiagnosticDeduplicator();
 
 	constructor(deps: AgentRegistryDeps) {
 		this.notify = deps.notify;
-		this.remind = deps.remind ?? (() => {});
-		this.supervisionIntervalMs = deps.supervisionIntervalMs ?? 180_000;
+		this.supervision = new SupervisionService({
+			lookup: (agentId) => this.agents.get(agentId),
+			remind: deps.remind ?? (() => {}),
+			intervalMs: deps.supervisionIntervalMs ?? 180_000,
+		});
 		this.getWidget = deps.getWidget ?? (() => null);
 		this.hasParent = deps.hasParent ?? false;
-		// Cross-process collision guard: reserve ancestor/cousin names so
-		// nextAgentId can never re-roll them. Absent/malformed env seeds
-		// nothing — today's behavior exactly.
 		const seeds = deps.seedNames ?? parseAncestorIds(process.env[ANCESTOR_IDS_ENV]);
-		for (const name of seeds) {
-			if (ANCESTOR_ID_PATTERN.test(name)) this.usedNames.add(name);
-		}
+		this.names = new AgentNameAllocator(seeds);
 	}
 
-	/**
-	 * Short human-name id (max, zoe, kai…) — the LLM-facing agent reference
-	 * for this session (agent_send targets, notification JSON). Names read
-	 * as names (not machine codes) and cost ~1 token each; uniqueness is
-	 * this session's live set (re-roll on collision) plus the ancestor ids
-	 * seeded from PI_SUBAGENT_ANCESTOR_IDS at construction, so a nested
-	 * child process can never re-roll an ancestor/cousin name.
-	 */
+	/** Allocate a unique short child name, reserving ancestor names. */
 	nextAgentId(): string {
-		const name = randomAgentName(this.usedNames);
-		this.usedNames.add(name);
-		return name;
+		return this.names.next();
 	}
 
 	/** Track a background agent: registry entry + widget row. */
@@ -254,80 +119,20 @@ export class AgentRegistry {
 	}
 
 	/** Snapshot used by compaction. It never reads child transcripts or changes the registry. */
-	checkpointRoster(limit = 24): {
-		v: 1;
-		total: number;
-		agents: Array<{ id: string; label: string; description: string; state: "running" | "waiting" | "idle" }>;
-	} {
-		const active = [...this.agents.values()].filter(
-			(agent) => !agent.stoppedByControl && agent.status !== "failed" && agent.status !== "stopped",
-		);
-		const state = (agent: RegisteredAgent): "running" | "waiting" | "idle" =>
-			agent.awaitingParent ? "waiting" : agent.status === "completed" ? "idle" : "running";
-		const priority = { waiting: 0, running: 1, idle: 2 };
-		active.sort((a, b) => priority[state(a)] - priority[state(b)]);
-		const compact = (value: string, length: number) => value.replace(/\s+/g, " ").trim().slice(0, length);
-		return {
-			v: 1,
-			total: active.length,
-			agents: active.slice(0, Math.max(1, Math.min(24, limit))).map((agent) => ({
-				id: agent.agentId,
-				label: compact(agent.label, 80),
-				description: compact(agent.taskSummary ?? "", 120),
-				state: state(agent),
-			})),
-		};
+	checkpointRoster(limit = 24): ReturnType<typeof checkpointRoster> {
+		return checkpointRoster(this.agents, limit);
 	}
 
-	/**
-	 * Compact direct-child address book for a failed agent_send.
-	 * Running and resident children are deliverable; exited children are
-	 * inspectable but cannot be resumed. Never advertise descendants.
-	 */
 	describeMessageTargets(target: string, limit = 8): string {
-		const active = [...this.agents.values()];
-		const ended = [...this.settlements.entries()].filter(([id]) => !this.agents.has(id));
-		const targetSettlement = this.settlements.get(target);
-		const targetNote =
-			!this.agents.has(target) && targetSettlement
-				? `@${target} finished (${targetSettlement.completion.status}); its process exited and cannot receive agent_send. `
-				: "";
-		const available = active.slice(0, limit).map((agent) => {
-			const state = agent.awaitingParent
-				? "waiting for answer"
-				: agent.status === "completed"
-					? "idle, reusable"
-					: (agent.status ?? "running");
-			return `@${agent.agentId} (${agent.label}, ${state})`;
-		});
-		const completed = ended.slice(-limit).map(([id, settlement]) => `@${id} (${settlement.completion.status}, exited)`);
-		return (
-			targetNote +
-			`Deliverable direct children: ${available.join(", ") || "none"}${active.length > limit ? ` (+${active.length - limit} more)` : ""}. ` +
-			`Finished/exited: ${completed.join(", ") || "none"}${ended.length > limit ? ` (+${ended.length - limit} more)` : ""}. ` +
-			"Use agent_inspect on a finished child to read its result. To continue work after it exited, spawn a new child; only resident children accept agent_send."
-		);
+		return describeMessageTargets(this.agents, this.settlements, target, limit);
 	}
 
-	/** True for an identical diagnostic previously sent to this child within ten minutes. */
 	wasDiagnosticSentRecently(target: string, message: string, now = Date.now()): boolean {
-		const key = target + "\0" + message.trim().replace(/\s+/g, " ");
-		const previous = this.recentDiagnostics.get(key);
-		return previous !== undefined && now >= previous && now - previous < 600_000;
+		return this.diagnosticDedup.wasSentRecently(target, message, now);
 	}
 
-	/** Only successful deliveries are recorded. Old entries are bounded and pruned. */
 	recordSentDiagnostic(target: string, message: string, now = Date.now()): void {
-		for (const [key, at] of this.recentDiagnostics) {
-			if (now - at >= 600_000) this.recentDiagnostics.delete(key);
-		}
-		const key = target + "\0" + message.trim().replace(/\s+/g, " ");
-		this.recentDiagnostics.set(key, now);
-		while (this.recentDiagnostics.size > 100) {
-			const oldest = this.recentDiagnostics.keys().next().value;
-			if (oldest === undefined) break;
-			this.recentDiagnostics.delete(oldest);
-		}
+		this.diagnosticDedup.recordSent(target, message, now);
 	}
 
 	/** Known completed tasks remain inspectable after their processes exit. */
@@ -353,8 +158,8 @@ export class AgentRegistry {
 		for (const item of pending) void Promise.resolve(item.announce()).catch(() => {});
 	}
 
-	/** Mark only actual parent-visible progress, not work merely queued for
-	 * delivery. A diagnostic ping is not sufficient to suppress a wake-up. */
+	/** Mark progress only after actual parent delivery. A diagnostic ping does
+	 * not establish that the task's substantive result was already received. */
 	noteDeliveredParentMessage(message: AgentMessage): void {
 		const id = message.from.startsWith("@") ? message.from.slice(1) : message.from;
 		if (message.kind === "diagnostic" || !(this.agents.has(id) || this.settlements.has(id))) return;
@@ -423,7 +228,7 @@ export class AgentRegistry {
 			(live && settlement.completion.generation !== undefined && settlement.completion.generation !== live.generation)
 		)
 			return false;
-		this.stopSupervision(agentId);
+		this.supervision.stop(agentId);
 		// A new settlement supersedes any unannounced result from an earlier turn.
 		this.pendingAnnouncements.delete(agentId);
 		this.settlements.set(agentId, settlement);
@@ -471,93 +276,23 @@ export class AgentRegistry {
 
 	/** Start/restart fallback supervision for a live direct child. */
 	startSupervision(agentId: string): void {
-		if (this.supervisionIntervalMs <= 0 || !this.agents.has(agentId)) return;
-		this.supervisedAgents.add(agentId);
-		this.lastSupervisedAt.set(agentId, Date.now());
-		this.scheduleSupervision(agentId);
+		this.supervision.start(agentId);
 	}
 
-	/** Parent started/resumed a model turn: reminders are unnecessary while it is actively supervising. */
 	parentBecameActive(): void {
 		this.parentActive = true;
-		for (const timer of this.supervisionTimers.values()) clearTimeout(timer);
-		this.supervisionTimers.clear();
+		this.supervision.parentBecameActive();
 	}
 
-	/**
-	 * Parent fully settled: announce any child results not consumed by agent_wait,
-	 * then begin a fresh unsupervised window for every still-live tracked child.
-	 */
+	/** Only a fully idle parent can announce deferred results. */
 	parentBecameIdle(): void {
 		this.parentActive = false;
 		this.parentReachedBoundary();
-		const now = Date.now();
-		for (const agentId of this.supervisedAgents) {
-			this.lastSupervisedAt.set(agentId, now);
-			this.scheduleSupervision(agentId);
-		}
+		this.supervision.parentBecameIdle();
 	}
 
-	/** Reset an already-active supervision clock without enabling supervision for a new child. */
 	touchSupervision(agentId: string): void {
-		if (!this.supervisedAgents.has(agentId)) {
-			return;
-		}
-		this.lastSupervisedAt.set(agentId, Date.now());
-		this.scheduleSupervision(agentId);
-	}
-
-	private scheduleSupervision(agentId: string): void {
-		const existing = this.supervisionTimers.get(agentId);
-		if (existing) clearTimeout(existing);
-		this.supervisionTimers.delete(agentId);
-		if (
-			this.supervisionIntervalMs <= 0 ||
-			this.parentActive ||
-			!this.supervisedAgents.has(agentId) ||
-			(this.activeWaits.get(agentId) ?? 0) > 0
-		)
-			return;
-		const agent = this.agents.get(agentId);
-		if (!agent || (agent.status && agent.status !== "running" && agent.status !== "queued")) return;
-		const timer = setTimeout(() => {
-			this.supervisionTimers.delete(agentId);
-			const current = this.agents.get(agentId);
-			if (!current || (current.status && current.status !== "running" && current.status !== "queued")) return;
-			if (this.parentActive || (this.activeWaits.get(agentId) ?? 0) > 0) return;
-			const now = Date.now();
-			const since = now - (this.lastSupervisedAt.get(agentId) ?? now);
-			this.lastSupervisedAt.set(agentId, now);
-			void Promise.resolve(this.remind(current, since)).catch(() => {});
-			this.scheduleSupervision(agentId);
-		}, this.supervisionIntervalMs);
-		this.supervisionTimers.set(agentId, timer);
-	}
-
-	private pauseSupervision(agentId: string): void {
-		const n = (this.activeWaits.get(agentId) ?? 0) + 1;
-		this.activeWaits.set(agentId, n);
-		const timer = this.supervisionTimers.get(agentId);
-		if (timer) clearTimeout(timer);
-		this.supervisionTimers.delete(agentId);
-	}
-
-	private resumeSupervision(agentId: string): void {
-		const n = Math.max(0, (this.activeWaits.get(agentId) ?? 0) - 1);
-		if (n) this.activeWaits.set(agentId, n);
-		else this.activeWaits.delete(agentId);
-		if (!this.supervisedAgents.has(agentId)) return;
-		this.lastSupervisedAt.set(agentId, Date.now());
-		if (n === 0) this.scheduleSupervision(agentId);
-	}
-
-	private stopSupervision(agentId: string): void {
-		const timer = this.supervisionTimers.get(agentId);
-		if (timer) clearTimeout(timer);
-		this.supervisionTimers.delete(agentId);
-		this.supervisedAgents.delete(agentId);
-		this.activeWaits.delete(agentId);
-		this.lastSupervisedAt.delete(agentId);
+		this.supervision.touch(agentId);
 	}
 
 	/**
@@ -594,9 +329,9 @@ export class AgentRegistry {
 		if (timeoutMs !== undefined && (!Number.isFinite(timeoutMs) || timeoutMs < 0)) {
 			throw new Error("agent_wait timeout must be a finite non-negative duration");
 		}
-		this.pauseSupervision(agentId);
+		this.supervision.pause(agentId);
 		if (timeoutMs === 0) {
-			this.resumeSupervision(agentId);
+			this.supervision.resume(agentId);
 			return null;
 		}
 		return await new Promise<AgentSettlement | AgentWaitEvent | null | undefined>((resolve, reject) => {
@@ -613,7 +348,7 @@ export class AgentRegistry {
 				this.messageWaiters.delete(wake);
 				signal?.removeEventListener("abort", onAbort);
 				if (timer) clearTimeout(timer);
-				this.resumeSupervision(agentId);
+				this.supervision.resume(agentId);
 			};
 			const finish = (event: AgentSettlement | AgentWaitEvent | null | undefined) => {
 				cleanup();
@@ -656,9 +391,6 @@ export class AgentRegistry {
 				? undefined
 				: () =>
 						this.notify(agent, completion, {
-							// An agent_send progress update already reached the parent's model.
-							// A second wake after its answer would be redundant, but the
-							// completion card and future-session context must still be saved.
 							triggerTurn: !this.deliveredParentProgress.has(agent.agentId),
 						}),
 			agent.stoppedByControl ? undefined : { agent, completion },
@@ -700,8 +432,8 @@ export class AgentRegistry {
 		if (this.closing || this.stoppedIds.has(target)) return false;
 		if (this.agents.get(target) !== agent) return ok;
 		if (!ok) {
-			// A failed steer did not begin a new task. Restore the old receipt
-			// unless a concurrent new settlement superseded that generation.
+			// Failed send did not begin another task. Preserve the receipt unless
+			// a concurrent new settlement superseded the generation.
 			if (priorProgressDelivered && !this.settlements.has(target)) this.deliveredParentProgress.add(target);
 			if (previous && !this.settlements.has(target) && agent.status !== "running") {
 				this.settlements.set(target, previous);
@@ -763,7 +495,7 @@ export class AgentRegistry {
 		for (const agent of owned) {
 			this.stoppedIds.add(agent.agentId);
 			agent.markStopped();
-			this.stopSupervision(agent.agentId);
+			this.supervision.stop(agent.agentId);
 		}
 		for (const waiters of this.settlementWaiters.values()) for (const resolve of waiters) resolve(undefined);
 		this.settlementWaiters.clear();
@@ -782,7 +514,7 @@ export class AgentRegistry {
 	}
 
 	private remove(agentId: string, result?: WidgetResult): void {
-		this.stopSupervision(agentId);
+		this.supervision.stop(agentId);
 		// Only touch the widget for agents we actually tracked — a spawn-
 		// failure completion never registered, so delete() returns false and
 		// the widget stays untouched (no spurious requestRender).

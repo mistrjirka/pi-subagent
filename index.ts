@@ -3,7 +3,10 @@ import { reportedAgentState } from "./agent-state.js";
  * pi-subagent — spawn isolated sub‑agent pi instances + in-tree messaging.
  *
  * Architecture:
- *   index.ts          — tool registration (agent_spawn / agent_wait / agent_inspect / agent_stop / agent_send) + routing glue
+ *   index.ts          — entrypoint, shared registry, spawn lifecycle and extension hooks
+ *   monitoring-tools.ts — agent_wait / agent_inspect
+ *   control-tools.ts — agent_stop / agent_send / ask_parent
+ *   message-router.ts — direct-child and parent message transport
  *   protocol.ts       — pure JSONL protocol layer + in-tree routing (tested)
  *   rpc-client.ts     — stateful thin JSONL client (spawn + transport)
  *   event-interpret.ts— raw RpcEvent → AgentEvent adapter (pure, tested)
@@ -35,31 +38,20 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { ExtensionAPI, ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import {
-	AskParentParamsSchema,
-	buildSpawnParamsSchema,
-	canDelegate,
-	SendParamsSchema,
-	type SpawnParams,
-	StopParamsSchema,
-} from "./tool-params.js";
+import { registerControlTools } from "./control-tools.js";
+import { MessageRouter } from "./message-router.js";
+import { buildSpawnParamsSchema, canDelegate, type SpawnParams } from "./tool-params.js";
 
 export { buildSpawnParamsSchema, canDelegate, shouldRunInBackground } from "./tool-params.js";
 
 import { AgentProcess } from "./agent-process.js";
-import {
-	type AgentActivity,
-	type AgentTreeEvent,
-	MSG_STATUS_KEY,
-	QUESTION_STATUS_KEY,
-	TREE_STATUS_KEY,
-} from "./event-interpret.js";
+import { type AgentActivity, type AgentTreeEvent, TREE_STATUS_KEY } from "./event-interpret.js";
 import { ExternalControlBridge } from "./external-control.js";
 import { createLiveChannels } from "./live-output.js";
 import { registerMonitoringTools } from "./monitoring-tools.js";
 import { completionContextContent, notifyCompletion } from "./notification.js";
 import { discoverAgentProfiles, parseAllowedSubagentsEnv } from "./profiles.js";
-import { type AgentMessage, type AgentQuestion, formatFrom, formatParentMessage } from "./protocol.js";
+import { type AgentMessage, type AgentQuestion, formatParentMessage } from "./protocol.js";
 import { RecoveryStore } from "./recovery.js";
 import { AgentRegistry, buildAncestorChain, type RegisteredAgent, type WidgetSurface } from "./registry.js";
 import { renderNotification } from "./render.js";
@@ -69,7 +61,7 @@ import { runSpawnSession, type SpawnOutcome } from "./spawn-session.js";
 import { getMonitoringTranscript, IncrementalTranscriptCursor } from "./transcript.js";
 import { createSubtreeDisplay } from "./tree-display.js";
 import type { SubagentDetails } from "./types.js";
-import { atId, sendView, spawnView, stopView } from "./views.js";
+import { spawnView } from "./views.js";
 import { AgentWidget } from "./widget.js";
 
 // ─── Running background agents registry ─────────────────────
@@ -243,86 +235,6 @@ function spawnErrorResult(
 	};
 }
 
-/** Keep the original custom-message UI when the parent is idle. */
-function deliverParentMessage(pi: ExtensionAPI, msg: AgentMessage): void {
-	pi.sendMessage(
-		{
-			customType: "subagent-message",
-			content: formatParentMessage(msg),
-			display: true,
-			details: {
-				from: msg.from,
-				message: msg.message,
-				...(msg.sentAt ? { sentAt: msg.sentAt } : {}),
-				...(msg.kind ? { kind: msg.kind } : {}),
-			},
-		},
-		{ deliverAs: "steer", triggerTurn: true },
-	);
-}
-
-/**
- * Route one in-tree message through the tree (per-hop O(1) against my
- * direct children). Shared by the agent_send tool (outbound: the caller
- * gets a synchronous result) and the inbound handler (child→parent: no
- * return path, so errors are delivered back to the sender as messages).
- *
- *   direct child → rpc prompt + steer (wakes idle, queues on running)
- *   "@parent"   → the parent injects it into its LLM (or mine, inbound)
- *   unknown     → explicit error (routing is the LLM's job, hop by hop);
- *                 on the inbound path the sender is told best-effort
- */
-async function handleMessage(
-	pi: ExtensionAPI,
-	registry: AgentRegistry,
-	msg: AgentMessage,
-	outbound: boolean,
-	answerToQuestion = false,
-): Promise<{ ok: boolean; verb?: string; error?: string }> {
-	if (!outbound && msg.to === "@parent") {
-		// Finish an active agent_wait now. The tool result delivers the message;
-		// queueing a steer too would show it a second time.
-		if (registry.wakeWaitForMessage(msg)) return { ok: true, verb: "delivered" };
-		// A child addressing "@parent" means this receiving session. Do not
-		// re-route it using this process's own parent capability: at the root
-		// that would incorrectly turn a successful child→root delivery into
-		// "root session has no parent".
-		if (!registry.queueParentMessageIfActive(msg)) {
-			deliverParentMessage(pi, msg);
-			registry.noteDeliveredParentMessage(msg);
-		}
-		return { ok: true, verb: "delivered" };
-	}
-
-	const d = registry.route(msg);
-	switch (d.kind) {
-		case "child": {
-			// Point-to-point delivery to a direct child. Cross-level coordination
-			// is the LLM's job: it addresses only ids it knows, hop by hop.
-			const text = `${formatFrom(d.message.from)}${d.message.message}`;
-			const queued = registry.lookup(d.childId)?.status === "running";
-			const ok = await registry.deliver(d.childId, text, answerToQuestion);
-			return ok
-				? { ok: true, verb: queued ? "queued" : "accepted" }
-				: { ok: false, error: `delivery to ${d.childId} failed` };
-		}
-		case "parent": {
-			// Outbound only: inbound child→parent delivery is handled above.
-			if (!uiRef) return { ok: false, error: "Cannot deliver to @parent: child extension UI channel is unavailable." };
-			uiRef.setStatus(MSG_STATUS_KEY, JSON.stringify(d.message));
-			// setStatus emits an event, but offers no parent-receipt acknowledgement.
-			return { ok: true, verb: "sent" };
-		}
-		case "error": {
-			if (!outbound && msg.from) {
-				// Inbound path, no return channel: tell the sender (best-effort).
-				void registry.deliver(msg.from, `[pi-subagent] agent_send to ${msg.to} failed: ${d.reason}`);
-			}
-			return { ok: false, error: d.reason };
-		}
-	}
-}
-
 // ─── Default export (pi extension entry) ───────────────────────
 
 export default function (pi: ExtensionAPI) {
@@ -417,6 +329,7 @@ export default function (pi: ExtensionAPI) {
 		getWidget: () => widgetSurface(),
 		hasParent: HAS_PARENT,
 	});
+	const router = new MessageRouter(pi, registry, () => uiRef);
 	const controlBridges = new Set<ExternalControlBridge>();
 	// Root-owned persistent children can be explicitly recovered after their parent
 	// exits. Nested workers retain only the existing in-process lifetime.
@@ -450,7 +363,7 @@ export default function (pi: ExtensionAPI) {
 	// Completions remain deferred, because agent_wait may still consume them.
 	pi.on("turn_end", () => {
 		for (const message of registry.takePendingParentMessages()) {
-			deliverParentMessage(pi, message);
+			router.deliverParentMessage(message);
 			registry.noteDeliveredParentMessage(message);
 		}
 	});
@@ -464,7 +377,7 @@ export default function (pi: ExtensionAPI) {
 		// needs a new parent turn. Otherwise idle sends the completion first
 		// and starts a redundant model request before the progress is counted.
 		for (const message of messages) {
-			deliverParentMessage(pi, message);
+			router.deliverParentMessage(message);
 			registry.noteDeliveredParentMessage(message);
 		}
 		registry.parentBecameIdle();
@@ -492,7 +405,7 @@ export default function (pi: ExtensionAPI) {
 	// message, or reports an unroutable target) land here from its rpc event
 	// stream and re-enter the router on this hop.
 	const onChildMessage = (msg: AgentMessage): void => {
-		void handleMessage(pi, registry, msg, false);
+		void router.route(msg, false);
 	};
 
 	// Tree telemetry for this node's own children (up-report) and forwarding
@@ -1023,229 +936,20 @@ export default function (pi: ExtensionAPI) {
 		hasParent: HAS_PARENT,
 	});
 
-	// ── agent_stop ───────────────────────────────────────
-	pi.registerTool({
-		name: "agent_stop",
-		label: "Stop Agent",
-		description:
-			"Terminate a sub-agent: a running agent discards its work; a persistent (idle) " +
-			"agent exits and is removed. The completion notification is " +
-			"suppressed for deliberate stops.",
-		promptSnippet: "Stop a running or idle sub-agent",
-		promptGuidelines: [
-			"Use agent_stop when a background agent is consuming tokens on a wrong path — stop it and respawn with a corrected prompt.",
-			"Stop a persistent agent when you no longer need it — an idle agent still holds a resident process until stopped.",
-		],
-		parameters: StopParamsSchema,
-
-		async execute(_toolCallId, raw, _signal, onUpdate) {
-			// No captureUi here: agent_stop never sends upward (no child→parent path).
-			const params = raw;
-			// Honour the @ reference form we teach — strip once, use everywhere
-			// (lookup, stopAndRemove, details) so no @@ double prefix appears.
-			const agentId = params.agent_id.replace(/^@/, "");
-			const agent = registry.lookup(agentId);
-
-			if (!agent) {
-				// Card title needs the id: details.agentId drives titleFrom (the
-				// args key is snake_case agent_id, which titleFrom does not read).
-				return {
-					content: [{ type: "text", text: `agent ${params.agent_id} not found or already finished.` }],
-					details: { agentId, error: `agent ${params.agent_id} not found or already finished` },
-					isError: true,
-				};
-			}
-
-			// Partial update first — drives the `⠋ agent_stop <label> stopping…`
-			// spinner line while the child is being stopped.
-			onUpdate?.({
-				content: [{ type: "text", text: `Stopping ${agent.label}\u2026` }],
-				details: { label: agent.label, agentId },
-			});
-			try {
-				const stopped = await registry.stopAndRemove(agentId);
-				if (stopped) {
-					tree.remove(agentId, "stopped");
-					const recordId = childRecoveryIds.get(agentId);
-					if (recordId) recovery?.retire(recordId);
-				}
-				if (!stopped) {
-					// Finished between lookup and removal (rare) — don't claim
-					// a stop that never happened.
-					const message = `agent ${params.agent_id} already finished.`;
-					return {
-						content: [{ type: "text", text: message }],
-						details: { agentId, label: agent.label, error: message },
-						isError: true,
-					};
-				}
-				return {
-					content: [{ type: "text", text: `Stopped agent @${agentId}.` }],
-					details: { agentId, label: agent.label },
-				};
-			} catch (err) {
-				// Child died mid-stop (e.g. write-after-end): surface it as a
-				// proper status line, not a bare thrown error.
-				const message = err instanceof Error ? err.message : String(err);
-				return {
-					content: [{ type: "text", text: message }],
-					details: { agentId, label: agent.label, error: message },
-					isError: true,
-				};
-			}
+	registerControlTools(pi, {
+		registry,
+		agentId: MY_AGENT_ID,
+		hasParent: HAS_PARENT,
+		captureUi,
+		setStatus: (key, value) => uiRef?.setStatus(key, value),
+		routeMessage: (message, outbound, answerToQuestion) => router.route(message, outbound, answerToQuestion),
+		removeFromTree: (agentId) => tree.remove(agentId, "stopped"),
+		retireRecovery: (agentId) => {
+			const recordId = childRecoveryIds.get(agentId);
+			if (recordId) recovery?.retire(recordId);
 		},
-
-		...stopView,
+		toErrorResult,
 	});
-
-	// ── agent_send ──────────────────────────────────────
-	pi.registerTool({
-		name: "agent_send",
-		label: "Send Message",
-		description: "Send a message to another agent — a sub-agent or your parent.",
-		promptSnippet: "Send a message to a sub-agent or your parent",
-		promptGuidelines: [
-			"Send follow-up instructions to a running or idle agent with agent_send; its context is intact.",
-			"When a child is waiting after ask_parent, answer that exact child id with agent_send kind=answer. Ordinary instructions do not wake a waiting child.",
-			"The backend or contract owner chooses routine DTO/type names using existing code conventions; consumers read the current generated/source contract. Do not prescribe or repeatedly rename details without a verified incompatibility or a user requirement.",
-			"Child messages are asynchronous snapshots, not guaranteed current state. Before correcting a child, compare the message's sent time with newer updates and the current affected files. Intervene for genuine blockers, risks, ownership conflicts, or verified defects, not reassurance or stale progress.",
-			"Do not echo a child’s tool output or transient pi-lens warning. Only forward a current, verified, still-actionable diagnostic using kind=diagnostic with concrete evidence. Identical findings to the same child are deduplicated for ten minutes.",
-			"Use kind=urgent for safety violations, destructive scope mistakes, or immediate cross-owner conflicts. Urgent steering is never deduplicated.",
-		],
-		parameters: SendParamsSchema,
-
-		async execute(_toolCallId, raw, _signal, onUpdate, ctx) {
-			captureUi(ctx);
-			const params = raw;
-			const to = params.to?.trim();
-			const message = params.message?.trim();
-			// Honour the @ reference form we teach — but never strip @parent
-			// (the protocol layer routes on the literal value). Plain agent
-			// ids get stripped once, so lookup and the card title resolve and
-			// no @@ double prefix appears.
-			const target = to ? (to === "@parent" ? to : to.replace(/^@/, "")) : to;
-			if (!to) {
-				return {
-					content: [{ type: "text", text: "`to` is required." }],
-					details: { error: "`to` is required." },
-					isError: true,
-				};
-			}
-			if (!message) {
-				return {
-					content: [{ type: "text", text: "`message` is required." }],
-					details: { error: "`message` is required." },
-					isError: true,
-				};
-			}
-
-			if (params.kind === "diagnostic") {
-				if (!params.evidence?.trim() || params.evidence.trim().length < 15) {
-					return toErrorResult(
-						"Diagnostic steering needs current evidence: file, finding, and validation source. Do not relay unverified pi-lens output.",
-					);
-				}
-				if (registry.lookup(target) && registry.wasDiagnosticSentRecently(target, message)) {
-					return {
-						content: [
-							{ type: "text", text: `Same diagnostic already sent to ${atId(target)} within ten minutes; not resent.` },
-						],
-						details: { to: target, suppressedDuplicate: true },
-					};
-				}
-			}
-			onUpdate?.({
-				content: [{ type: "text", text: `Sending to ${atId(target)}\u2026` }],
-				details: { to: target },
-			});
-			const waiting = registry.lookup(target)?.awaitingParent === true;
-			if (waiting && params.kind !== "answer")
-				return toErrorResult(
-					`${atId(target)} is waiting for an ask_parent answer. Use agent_send kind=answer only when explicitly resolving its question.`,
-				);
-			if (params.kind === "answer" && !waiting)
-				return toErrorResult(
-					`${atId(target)} is not waiting for an ask_parent answer; use a normal instruction instead.`,
-				);
-			const r = await handleMessage(
-				pi,
-				registry,
-				{ to: target, from: MY_AGENT_ID, message, sentAt: Date.now(), ...(params.kind ? { kind: params.kind } : {}) },
-				true,
-				params.kind === "answer",
-			);
-			if (r.ok && params.kind === "diagnostic") registry.recordSentDiagnostic(target, message);
-			if (r.ok && !HAS_PARENT && target !== "@parent" && registry.lookup(target)) registry.startSupervision(target);
-			if (!r.ok) {
-				const reason = r.error ?? "delivery failed";
-				const isUnknownChild =
-					target !== "@parent" && (reason.startsWith("no such agent:") || reason.startsWith("delivery to "));
-				const text = isUnknownChild
-					? `${reason}
-
-${registry.describeMessageTargets(target)}`
-					: reason;
-				return {
-					content: [{ type: "text", text }],
-					details: { to: target, error: reason },
-					isError: true,
-				};
-			}
-			return {
-				content: [{ type: "text", text: `${r.verb} to ${atId(target)}.` }],
-				// Card title shows @id — target label (uniform with agent_stop).
-				details: {
-					to: target,
-					message,
-					label: registry.lookup(target)?.label,
-					agentId: registry.lookup(target)?.agentId,
-				},
-			};
-		},
-
-		...sendView,
-	});
-
-	// ── ask_parent ──────────────────────────────────────
-	if (HAS_PARENT) {
-		pi.registerTool({
-			name: "ask_parent",
-			label: "Ask Parent",
-			description:
-				"Escalate a blocker to the requested outcome when resolving it requires a material clarification, non-obvious diagnosis, or implementation decision from the immediate spawning agent. The current turn yields and this same context resumes when the parent answers.",
-			promptSnippet: "Escalate a blocker that needs parent clarification, diagnosis, or a material decision",
-			promptGuidelines: [
-				"Use ask_parent for material ambiguity or missing information that blocks the requested outcome, or when unexpected evidence blocks that outcome and resolving it requires non-obvious diagnosis or a material decision; make routine implementation decisions, obvious local fixes, and simple direct alternatives yourself.",
-				"Include the smallest safe reproduction or exact reproduction steps (or why reproduction is unsafe/impractical), the decisive evidence, what requirement or route it blocks or invalidates, and the specific decision/question for the parent.",
-				"Use the escalation only to resolve that blocker; do not broaden the artifact, add adjacent behavior, or raise its engineering scale.",
-				"After ask_parent succeeds, stop work and end the turn. Do not continue on an assumption. The parent will answer this same resident context with agent_send.",
-			],
-			parameters: AskParentParamsSchema,
-
-			async execute(_toolCallId, raw, _signal, _onUpdate, ctx) {
-				captureUi(ctx);
-				const params = raw;
-				const question = params.question?.trim();
-				const context = params.context?.trim();
-				if (!question) return toErrorResult("`question` is required.");
-				const payload: AgentQuestion = {
-					from: MY_AGENT_ID,
-					question,
-					...(context ? { context } : {}),
-				};
-				uiRef?.setStatus(QUESTION_STATUS_KEY, JSON.stringify(payload));
-				return {
-					content: [
-						{
-							type: "text",
-							text: "Question sent to your spawning agent. End this turn now and wait; do not guess or continue the blocked work. Your parent will answer with agent_send and this same context will resume.",
-						},
-					],
-					details: { waitingForParent: true, question, ...(context ? { context } : {}) },
-				};
-			},
-		});
-	}
 
 	// ── Notification card (user side) ───────────────────
 	pi.registerMessageRenderer("subagent-notification", renderNotification);

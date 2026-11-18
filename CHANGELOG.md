@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.23 — extract control tools and message routing
+
+- Move `agent_stop`, `agent_send`, and `ask_parent` registration into `control-tools.ts`, with typed ports for registry, parent status, recovery retirement and tree updates.
+- Move direct-child and parent message delivery into `MessageRouter`. Keep active-parent progress queued and idle-parent messages steered at the original boundary.
+- Preserve diagnostic deduplication, explicit `ask_parent` answers, supervision touches and stop-notification suppression. No runtime or wire-format changes.
+- Reduce `index.ts` from 1,272 to 976 lines. Add route, stop, send, question and extension-registration regression tests.
+
 ## 0.5.22 — separate parent monitoring tool handlers
 
 - Move `agent_wait` and `agent_inspect` registration, supervised timeout handling, unread transcript pages and completion-response formatting into `monitoring-tools.ts`.

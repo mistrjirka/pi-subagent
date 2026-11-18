@@ -1,5 +1,7 @@
 # Runtime boundaries
 
+- `message-router.ts` owns hop-by-hop direct-child delivery, parent status transport, and the parent message fallback. `MessageRouter` holds the Pi and registry ports. It does not own child lifetime or announcements.
+- `control-tools.ts` registers `agent_stop`, `agent_send`, and `ask_parent` with the same schema-derived arguments. It injects typed actions for message routing, status updates, tree removal, and recovery retirement instead of reading extension-global state.
 - `tool-params.ts` defines Pi tool schemas and derives argument types with TypeBox `Static`. The `agent_spawn` schema is different for root and child processes. The single explicit `SpawnParams` cast at the registered handler is the boundary for that runtime-dependent choice; other tool handlers use inferred schema types.
 - `spawn-coordinator.ts` makes an admission decision before launching a child. It resolves the named profile and model, enforces delegation/background policy, and claims any explicitly requested recovery. It takes a narrow `RecoveryPort` and injectable profile/model services. It never renders a card or starts a process.
 - `spawn-result.ts` presents background, completed, failed, stopped, and `ask_parent` outcomes. It builds the exact tool result and optional tree-removal decision. The caller still owns recovery-lease changes, tree mutations and the live UI update. No notification or process lifecycle policy changes.

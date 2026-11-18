@@ -98,8 +98,13 @@ export interface WidgetSurface {
 }
 
 interface AgentRegistryDeps {
-	/** Deliver a completion notification (index.ts wraps pi.sendMessage). */
-	notify: (agent: RegisteredAgent, completion: AgentCompletion) => Promise<void> | void;
+	/** Deliver a completion notification. A passive delivery displays the
+	 * completed result and appends it to future context without waking the LLM. */
+	notify: (
+		agent: RegisteredAgent,
+		completion: AgentCompletion,
+		delivery: { triggerTurn: boolean },
+	) => Promise<void> | void;
 	/** Fallback supervision reminder for a child left running without an active wait/steer. */
 	remind?: (agent: RegisteredAgent, unsupervisedMs: number) => Promise<void> | void;
 	/** Default 3 minutes. Set <= 0 to disable reminders. */
@@ -188,6 +193,9 @@ export class AgentRegistry {
 	private readonly pendingAnnouncements = new Map<string, PendingAnnouncement>();
 	/** Progress received while the parent was actively running. */
 	private readonly pendingParentMessages: AgentMessage[] = [];
+	/** A child already spoke to the parent during its current task. Its later
+	 * completion should be displayed and saved without starting another turn. */
+	private readonly deliveredParentProgress = new Set<string>();
 	private readonly remind: NonNullable<AgentRegistryDeps["remind"]>;
 	private readonly supervisionIntervalMs: number;
 	private readonly supervisionTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -236,6 +244,7 @@ export class AgentRegistry {
 	register(agent: RegisteredAgent, status: "running" | "idle" = "running"): void {
 		if (this.closing) throw new Error("Cannot register a child in a closing session.");
 		this.settlements.delete(agent.agentId);
+		this.deliveredParentProgress.delete(agent.agentId);
 		this.agents.set(agent.agentId, agent);
 		this.getWidget()?.add(agent, status);
 	}
@@ -344,6 +353,14 @@ export class AgentRegistry {
 		for (const item of pending) void Promise.resolve(item.announce()).catch(() => {});
 	}
 
+	/** Mark only actual parent-visible progress, not work merely queued for
+	 * delivery. A diagnostic ping is not sufficient to suppress a wake-up. */
+	noteDeliveredParentMessage(message: AgentMessage): void {
+		const id = message.from.startsWith("@") ? message.from.slice(1) : message.from;
+		if (message.kind === "diagnostic" || !(this.agents.has(id) || this.settlements.has(id))) return;
+		this.deliveredParentProgress.add(id);
+	}
+
 	/** Buffer progress until the next tool result, but never suppress progress messages. */
 	queueParentMessageIfActive(message: AgentMessage): boolean {
 		if (this.closing || !this.parentActive) return false;
@@ -360,6 +377,7 @@ export class AgentRegistry {
 		completions: Array<{ agent: RegisteredAgent; completion: AgentCompletion }>;
 	} {
 		const messages = this.pendingParentMessages.splice(0, maxMessages);
+		for (const message of messages) this.noteDeliveredParentMessage(message);
 		const completions: Array<{ agent: RegisteredAgent; completion: AgentCompletion }> = [];
 		for (const [id, item] of this.pendingAnnouncements) {
 			if (!item.inline || completions.length >= maxCompletions) continue;
@@ -441,6 +459,7 @@ export class AgentRegistry {
 	wakeWaitForMessage(message: AgentMessage): boolean {
 		if (this.closing || this.messageWaiters.size === 0) return false;
 		const event: AgentWaitMessage = { kind: "message", message };
+		this.noteDeliveredParentMessage(message);
 		// Wake the full tool batch, but include this payload in only one result.
 		let first = true;
 		for (const wake of [...this.messageWaiters]) {
@@ -617,6 +636,7 @@ export class AgentRegistry {
 	clearSettlement(agentId: string): void {
 		this.settlements.delete(agentId);
 		this.pendingAnnouncements.delete(agentId);
+		this.deliveredParentProgress.delete(agentId);
 	}
 
 	/**
@@ -632,7 +652,15 @@ export class AgentRegistry {
 		this.recordSettlement(
 			agent.agentId,
 			{ completion },
-			agent.stoppedByControl ? undefined : () => this.notify(agent, completion),
+			agent.stoppedByControl
+				? undefined
+				: () =>
+						this.notify(agent, completion, {
+							// An agent_send progress update already reached the parent's model.
+							// A second wake after its answer would be redundant, but the
+							// completion card and future-session context must still be saved.
+							triggerTurn: !this.deliveredParentProgress.has(agent.agentId),
+						}),
 			agent.stoppedByControl ? undefined : { agent, completion },
 		);
 		if ((agent.shouldStayResident ?? agent.persistent) && completion.status === "completed") {
@@ -664,6 +692,7 @@ export class AgentRegistry {
 		if (agent.awaitingParent && !answerToQuestion) return false;
 		const previous = this.settlements.get(target);
 		const announcement = this.pendingAnnouncements.get(target);
+		const priorProgressDelivered = this.deliveredParentProgress.has(target);
 		// Invalidate before suspension: never erase a completion produced while
 		// the RPC acknowledgement is in flight.
 		this.clearSettlement(target);
@@ -671,6 +700,9 @@ export class AgentRegistry {
 		if (this.closing || this.stoppedIds.has(target)) return false;
 		if (this.agents.get(target) !== agent) return ok;
 		if (!ok) {
+			// A failed steer did not begin a new task. Restore the old receipt
+			// unless a concurrent new settlement superseded that generation.
+			if (priorProgressDelivered && !this.settlements.has(target)) this.deliveredParentProgress.add(target);
 			if (previous && !this.settlements.has(target) && agent.status !== "running") {
 				this.settlements.set(target, previous);
 				if (announcement) this.pendingAnnouncements.set(target, announcement);
@@ -737,6 +769,7 @@ export class AgentRegistry {
 		this.settlementWaiters.clear();
 		this.pendingAnnouncements.clear();
 		this.pendingParentMessages.length = 0;
+		this.deliveredParentProgress.clear();
 		this.settlements.clear();
 		this.shutdownPromise = (async () => {
 			const results = await Promise.allSettled(owned.map((agent) => agent.stop()));

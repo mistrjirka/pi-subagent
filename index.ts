@@ -301,7 +301,10 @@ async function handleMessage(
 		// re-route it using this process's own parent capability: at the root
 		// that would incorrectly turn a successful child→root delivery into
 		// "root session has no parent".
-		if (!registry.queueParentMessageIfActive(msg)) deliverParentMessage(pi, msg);
+		if (!registry.queueParentMessageIfActive(msg)) {
+			deliverParentMessage(pi, msg);
+			registry.noteDeliveredParentMessage(msg);
+		}
 		return { ok: true, verb: "delivered" };
 	}
 
@@ -380,7 +383,7 @@ export default function (pi: ExtensionAPI) {
 	// completion policy (notify unless user-stopped; cleanup on every path),
 	// and the in-tree routing (direct children only — per-hop O(1)).
 	const registry = new AgentRegistry({
-		notify: (agent, completion) => notifyCompletion(pi, agent, completion),
+		notify: (agent, completion, delivery) => notifyCompletion(pi, agent, completion, delivery),
 		...(!HAS_PARENT
 			? {
 					remind: async (agent: Parameters<typeof notifyCompletion>[1], unsupervisedMs: number) => {
@@ -460,15 +463,25 @@ export default function (pi: ExtensionAPI) {
 	// model-turn boundary rather than holding it until the parent fully settles.
 	// Completions remain deferred, because agent_wait may still consume them.
 	pi.on("turn_end", () => {
-		for (const message of registry.takePendingParentMessages()) deliverParentMessage(pi, message);
+		for (const message of registry.takePendingParentMessages()) {
+			deliverParentMessage(pi, message);
+			registry.noteDeliveredParentMessage(message);
+		}
 	});
 	// Do not announce at turn_end: Pi queues the steer immediately, but a later
 	// agent_wait can consume the same result before that steer reaches the model.
 	// A tool result reports earlier completions; idle is the fallback boundary.
 	pi.on("agent_settled", () => {
 		const messages = registry.takePendingParentMessages();
+		// Pi can settle without emitting another turn_end. Publish and account
+		// for pending child progress *before* checking whether the completion
+		// needs a new parent turn. Otherwise idle sends the completion first
+		// and starts a redundant model request before the progress is counted.
+		for (const message of messages) {
+			deliverParentMessage(pi, message);
+			registry.noteDeliveredParentMessage(message);
+		}
 		registry.parentBecameIdle();
-		for (const message of messages) deliverParentMessage(pi, message);
 	});
 
 	// A tool result is the next safe model-visible boundary during an active turn.

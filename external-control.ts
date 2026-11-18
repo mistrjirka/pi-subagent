@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { reportedAgentState } from "./agent-state.js";
+import { AgentTelemetryService } from "./agent-telemetry.js";
 import type { AgentEvent } from "./event-interpret.js";
 
 export type ExternalAgentState = "queued" | "running" | "waiting" | "idle" | "completed" | "failed" | "stopped";
@@ -54,6 +55,11 @@ export interface ExternalControlStatus {
 	pendingQuestionContext?: string;
 	/** Actual execution, independent of model argument generation and heartbeat. */
 	activeTools?: Array<{ toolCallId: string; toolName: string; startedAt: number; timeoutSeconds?: number }>;
+	/** Counts and current context from actual child events, never a sampled session-file tail. */
+	turnCount?: number;
+	toolCount?: number;
+	windowTokens?: number;
+	lastActivityAt?: number;
 }
 
 type SteerRequest = {
@@ -220,10 +226,7 @@ export class ExternalControlBridge {
 	private lastFlush = Date.now();
 	private flushTimer: NodeJS.Timeout | undefined;
 	private eventsWritable = true;
-	private readonly activeTools = new Map<
-		string,
-		{ toolCallId: string; toolName: string; startedAt: number; timeoutSeconds?: number }
-	>();
+	private readonly telemetry = new AgentTelemetryService();
 	private readonly eventsCap: number;
 	private readonly flushInterval: number;
 	private readonly maxBuffered: number;
@@ -261,27 +264,9 @@ export class ExternalControlBridge {
 	 * write disables further event writes without affecting the agent run.
 	 */
 	appendEvents(event: AgentEvent): void {
-		if (event.type === "tool_execution_start") {
-			this.activeTools.set(event.toolCallId, {
-				toolCallId: event.toolCallId,
-				toolName: event.toolName,
-				startedAt: Date.now(),
-				...(event.timeoutSeconds !== undefined ? { timeoutSeconds: event.timeoutSeconds } : {}),
-			});
-			this.writeStatus();
-		} else if (event.type === "tool_execution_end") {
-			const active = this.activeTools.get(event.toolCallId);
-			if (!active || active.toolName !== event.toolName) return;
-			this.activeTools.delete(event.toolCallId);
-			this.writeStatus();
-		} else if (event.type === "tool_result_end") {
-			// A persisted tool result closes the call even without an execution-end.
-			// Only emit once; ordinary tools already ended on the earlier event.
-			const active = this.activeTools.get(event.toolCallId);
-			if (!active || active.toolName !== event.toolName) return;
-			this.activeTools.delete(event.toolCallId);
-			this.writeStatus();
-		}
+		const observation = this.telemetry.observe(event);
+		if (observation.changed) this.writeStatus();
+		if (!observation.emitStream) return;
 		if (!this.eventsWritable) return;
 		if (event.type === "assistant_start") {
 			// A contentIndex such as think-0/text-1 is only unique inside one
@@ -449,6 +434,10 @@ export class ExternalControlBridge {
 			state: stateOf(this.agent),
 			startedAt: this.agent.startedAt,
 			updatedAt: Date.now(),
+			...(() => {
+				const { activeTools: _activeTools, ...usage } = this.telemetry.snapshot();
+				return usage;
+			})(),
 			...(this.agent.sessionPath ? { sessionPath: this.agent.sessionPath } : {}),
 			...(this.agent.model ? { model: this.agent.model } : {}),
 			...(this.agent.thinking ? { thinking: this.agent.thinking } : {}),
@@ -461,8 +450,8 @@ export class ExternalControlBridge {
 							: {}),
 					}
 				: {}),
-			...(this.agent.status === "running" && this.activeTools.size
-				? { activeTools: [...this.activeTools.values()] }
+			...(this.agent.status === "running" && this.telemetry.snapshot().activeTools?.length
+				? { activeTools: this.telemetry.snapshot().activeTools }
 				: {}),
 		};
 	}

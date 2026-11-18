@@ -20,6 +20,8 @@ The runtime deliberately does very little orchestration. The **parent Pi decides
 
 The only forced termination paths are an explicit `agent_stop`, a user/parent abort of a foreground tool call, model/process failure, or teardown of the hosting Pi session (including new/resume/fork transitions).
 
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the runtime service boundaries and typed status protocol.
+
 ## Agent profiles
 
 Profiles are discovered in this order:

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.17 — extract spawn-result presentation
+
+- Move background-start, completed, resident, failed/stopped, and `ask_parent` tool response formatting out of the agent spawn handler into typed `spawn-result.ts`.
+- The presenter makes the optional child-tree removal decision, but the spawning handler still owns recovery leases, tree mutation, process lifecycle and notification ordering. No change to deferred parent completion delivery.
+- Add regression tests for all five result branches, recovery information, resident identity, and exactly typed `SubagentDetails`.
+
+Validation: 386 tests, TypeScript, and Biome pass locally.
+
 ## 0.5.16 — typed spawn coordinator and event-owned child telemetry
 
 - Publish child turn count, unique started-tool count, latest context window and real activity timestamp in optional v1 status fields. The status bridge now uses `AgentTelemetryService` and does not scan Pi session history.

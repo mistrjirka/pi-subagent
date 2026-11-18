@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.15 — do not show finished tools as still running
+
+- When Pi persists a final `toolResult` message, close the matching active command in the external status bridge even if the tool omitted `tool_execution_end` (observed with `code`).
+- Match both tool-call ID and tool name. Ignore duplicate completions, so ordinary tools keep one start/end pair in the live stream.
+- Add regression tests for missing execution-end events, duplicate completions, and unrelated/malformed result events.
+
+In the observed Torch implementer, 11 `code` calls had completed results in its session but remained falsely listed as running for over an hour. This fix takes effect for newly launched agent processes after extension reload/restart.
+
 ## 0.5.14 — compact live-agent roster for checkpoint handoff
 
 - Answer a synchronous in-process snapshot request with only direct active workers, their short names, states, labels, and bounded task descriptions. The extension does not read or duplicate child transcripts.

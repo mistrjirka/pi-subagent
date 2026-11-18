@@ -147,9 +147,7 @@ describe("recent supervision and older-history backfill", () => {
 		const dir = mkdtempSync(join(tmpdir(), "subagent-recent-"));
 		try {
 			const path = join(dir, "session.jsonl");
-			const entries = Array.from({ length: 20 }, (_, index) =>
-				message("e" + index, "step " + index),
-			);
+			const entries = Array.from({ length: 20 }, (_, index) => message("e" + index, "step " + index));
 			writeFileSync(path, entries.map((entry) => JSON.stringify(entry)).join("\n") + "\n");
 			const cursor = new IncrementalTranscriptCursor();
 			const agent: TranscriptReadableAgent = { sessionPath: path };

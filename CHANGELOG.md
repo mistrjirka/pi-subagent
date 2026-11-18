@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.5.13 — reliable large-session recovery and compaction rediscovery
+
+- Verify a recovered child's exact Pi session path and its nonempty `get_session_stats.totalMessages` count before sending a fresh prompt. The previous `get_messages` check serialized entire tool-heavy sessions and could fail or time out on very large histories.
+- Add read-only `agent_list` for running, waiting, reusable resident, and recently finished *direct* children. A parent can rediscover them after context compaction without reading huge transcripts or restarting the workers.
+- Keep recovery fail-closed on incorrect session, empty/unknown message count, project, branch, model, profile, or active ownership. Only explicitly persistent workers can be recovered after a parent process restart.
+- Pin Biome 2.5.5 and normalize existing formatting to make the full `npm run check` pass reproducibly.
+
+Validation: all 370 tests, TypeScript and Biome pass. Prior parent-session logs showed three failed resume attempts using the old full-history check and four compactions with inconsistent agent identifiers in summaries. Long-session live recovery still needs post-release validation.
+
+
 ## 0.5.12 — eager subagent updates and deduplicated results
 
 - Deliver child progress messages and completed child results in the next parent tool result, so the model can act without waiting for the parent's turn to settle.

@@ -201,12 +201,14 @@ export class AgentProcess {
 				this.status = "failed";
 				return { ok: false, error: "Pi did not load the requested recovery session. No task was sent." };
 			}
-			try {
-				const messages = await this.getMessages();
-				if (!messages.length) throw new Error("Saved session has no conversation history");
-			} catch {
+			// Do not request get_messages here. A persisted subagent can contain
+			// hundreds of MiB of tool details, and reconstructing/serializing the
+			// whole transcript just to check non-emptiness can stall or OOM recovery.
+			// Pi's get_session_stats returns the count without transferring content.
+			const stats = await this.sendData<{ totalMessages?: number }>({ type: "get_session_stats" });
+			if (!Number.isSafeInteger(stats?.totalMessages) || (stats?.totalMessages ?? 0) < 1) {
 				this.status = "failed";
-				return { ok: false, error: "Saved session history could not be verified. No task was sent." };
+				return { ok: false, error: "Saved session message count could not be verified. No task was sent." };
 			}
 		}
 		const response = await this.client

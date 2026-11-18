@@ -275,6 +275,12 @@ Parameters:
 
 Nested agents do not get `run_in_background`; their parent waits for them directly.
 
+### `agent_list` (current Pi process, including after compaction)
+
+Call `agent_list` with `{}` to list running, waiting, resident/idle, and recently finished *direct* children with their agent IDs. This is read-only and does not inspect their conversations, start a worker, or consume a queued result. Use it after a context compaction or when the parent no longer remembers which agents are active. A parent compaction does **not** stop its children; it only replaces older parent conversation history.
+
+After the parent Pi process exits or restarts, the live roster is gone. Use `agent_recover` instead to find recorded `persistent: true` child sessions in the same project and Git branch. Nonpersistent exited workers cannot be recovered.
+
 ### `agent_recover` (root-only, after a restart)
 
 Persistent children now leave a small, private recovery record under
@@ -306,8 +312,9 @@ from its saved transcript, with a fresh task prompt:
 ```
 
 The recovered process loads the earlier Pi conversation before accepting the
-new prompt. The extension verifies the loaded session path and that prior
-messages exist **before** sending any new task. A missing/invalid transcript,
+new prompt. The extension verifies the loaded session path and a nonzero message count
+from Pi session statistics **before** sending any new task. It does not fetch
+the full transcript for this check. A missing/invalid transcript,
 changed project, branch, profile or model, or an active owner prevents recovery.
 A deliberate `agent_stop` permanently retires the recovery id. A dead parent
 leaves a reclaimable lease, and normal session shutdown releases its lease.

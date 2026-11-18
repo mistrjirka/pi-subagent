@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { completionContextContent } from "../notification.js";
-import { AgentRegistry, type RegisteredAgent } from "../registry.js";
 import type { AgentMessage } from "../protocol.js";
+import { AgentRegistry, type RegisteredAgent } from "../registry.js";
 
 function fakeAgent(id: string): RegisteredAgent {
 	return {

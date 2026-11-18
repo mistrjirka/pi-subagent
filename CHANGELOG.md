@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.20 — isolate child wait subscriptions
+
+- Extract `AgentWaitCoordinator` from `AgentRegistry`. It owns explicit `agent_wait` subscriptions, parallel completion/message coalescing, timeout/abort cleanup and shutdown unblocking.
+- Preserve the v0.5.18 no-duplicate-notification policy, `ask_parent` urgency, parent messages and child process lifetime. The registry now contains fewer than 500 lines.
+- Add focused regression tests for concurrent waits, cross-child progress, supervision pause/resume, expiry, abort and shutdown.
+
+Validation: 411 tests passed, TypeScript and Biome passed.
+
 ## 0.5.19 — split child-registry supervision and projections
 
 - Extract fallback supervision timers and parent-active/idle scheduling into `SupervisionService`.

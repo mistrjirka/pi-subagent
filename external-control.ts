@@ -4,7 +4,10 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { reportedAgentState } from "./agent-state.js";
 import { AgentTelemetryService } from "./agent-telemetry.js";
+import { ChildEventWriter, type ExternalControlOptions } from "./child-event-writer.js";
 import type { AgentEvent } from "./event-interpret.js";
+
+export type { ChildStreamLine, ExternalControlOptions } from "./child-event-writer.js";
 
 export type ExternalAgentState = "queued" | "running" | "waiting" | "idle" | "completed" | "failed" | "stopped";
 
@@ -122,85 +125,6 @@ function stateOf(agent: ExternallyControllableAgent): ExternalAgentState {
 	return reportedAgentState(agent);
 }
 
-/** O_NOFOLLOW where the platform defines it (0 elsewhere — open still applies). */
-function openNoFollow(): number {
-	return typeof fs.constants.O_NOFOLLOW === "number" ? fs.constants.O_NOFOLLOW : 0;
-}
-
-/**
- * Map one interpreted event onto an `events.jsonl` record. Undefined = no new
- * stream content (settle/message/question/tree/failure and model argument
- * generation). Tool lifecycle rows come only from actual execution events. Block identity derives from the
- * wire contentIndex so consecutive lines sharing (runId, blockId) accumulate
- * into one in-flight item on the reader side.
- */
-function toStreamRecord(event: AgentEvent):
-	| {
-			kind: ChildStreamLine["kind"];
-			blockId?: string;
-			text?: string;
-			toolName?: string;
-			toolCallId?: string;
-			argsPreview?: string;
-			timeoutSeconds?: number;
-			isError?: boolean;
-	  }
-	| undefined {
-	switch (event.type) {
-		case "thinking":
-			if (event.text === undefined) return undefined;
-			return { kind: "thinking", blockId: `think-${event.contentIndex ?? 0}`, text: event.text };
-		case "text_delta":
-			return { kind: "text", blockId: `text-${event.contentIndex ?? 0}`, text: event.delta };
-		case "tool_execution_start":
-			return {
-				kind: "tool_start",
-				toolName: event.toolName,
-				toolCallId: event.toolCallId,
-				argsPreview: event.argsPreview,
-				...(event.timeoutSeconds !== undefined ? { timeoutSeconds: event.timeoutSeconds } : {}),
-			};
-		case "tool_execution_end":
-			return { kind: "tool_end", toolName: event.toolName, toolCallId: event.toolCallId, isError: event.isError };
-		case "tool_result_end":
-			return { kind: "tool_end", toolName: event.toolName, toolCallId: event.toolCallId, isError: event.isError };
-		default:
-			return undefined;
-	}
-}
-
-/** Tuning knobs for the `events.jsonl` appender (all optional; defaults implement the frozen contract). */
-export interface ExternalControlOptions {
-	/** Stop writing thinking/text lines after this many file bytes (tool lines continue). Default 2 MiB. */
-	eventsCapBytes?: number;
-	/** Coalescing window: a non-empty buffer is flushed at most this often. Default 250 ms. */
-	flushIntervalMs?: number;
-	/** Flush as soon as the buffered bytes exceed this. Default ~4 KiB. */
-	maxBufferedBytes?: number;
-}
-
-/** One `events.jsonl` line as written (v: 1 envelope; readers ignore unknown fields). */
-export interface ChildStreamLine {
-	v: 1;
-	seq: number;
-	ts: number;
-	runId: string;
-	/** 1-based assistant message sequence. Optional for backward compatibility. */
-	messageSeq?: number;
-	kind: "thinking" | "text" | "tool_start" | "tool_end";
-	blockId?: string;
-	text?: string;
-	toolName?: string;
-	toolCallId?: string;
-	argsPreview?: string;
-	timeoutSeconds?: number;
-	isError?: boolean;
-}
-
-const EVENTS_CAP_BYTES = 2 * 1024 * 1024;
-const EVENTS_FLUSH_MS = 250;
-const EVENTS_BUFFER_BYTES = 4 * 1024;
-
 /**
  * Tiny file bridge for UIs such as PiTTy. It is not an orchestration layer:
  * it only mirrors state and accepts direct steer/stop commands for this exact
@@ -215,21 +139,8 @@ export class ExternalControlBridge {
 	private readonly acks: string;
 	private timer: NodeJS.Timeout | undefined;
 	private processing = false;
-	// ── events.jsonl appender state ──
-	private seq = 0;
-	private assistantMessageSeq = 0;
-	private currentAssistantMessageSeq: number | undefined;
-	private fileBytes = 0;
-	private buf: Array<{ line: string; kind: ChildStreamLine["kind"]; bytes: number }> = [];
-	private bufBytes = 0;
-	private bufKey = "";
-	private lastFlush = Date.now();
-	private flushTimer: NodeJS.Timeout | undefined;
-	private eventsWritable = true;
 	private readonly telemetry = new AgentTelemetryService();
-	private readonly eventsCap: number;
-	private readonly flushInterval: number;
-	private readonly maxBuffered: number;
+	private readonly eventWriter: ChildEventWriter;
 
 	constructor(
 		private readonly agent: ExternallyControllableAgent,
@@ -251,10 +162,7 @@ export class ExternalControlBridge {
 		this.acks = path.join(this.controlDir, "control", "acks");
 		mkdirPrivate(this.inbox);
 		mkdirPrivate(this.acks);
-		this.eventsCap = options.eventsCapBytes ?? EVENTS_CAP_BYTES;
-		this.flushInterval = options.flushIntervalMs ?? EVENTS_FLUSH_MS;
-		this.maxBuffered = options.maxBufferedBytes ?? EVENTS_BUFFER_BYTES;
-		this.createEventsFile();
+		this.eventWriter = new ChildEventWriter(this.eventsPath, agent.agentId, options);
 		this.writeStatus();
 	}
 
@@ -266,135 +174,12 @@ export class ExternalControlBridge {
 	appendEvents(event: AgentEvent): void {
 		const observation = this.telemetry.observe(event);
 		if (observation.changed) this.writeStatus();
-		if (!observation.emitStream) return;
-		if (!this.eventsWritable) return;
-		if (event.type === "assistant_start") {
-			// A contentIndex such as think-0/text-1 is only unique inside one
-			// assistant message. Flush any previous buffer before advancing the
-			// turn so equal block ids from adjacent messages never coalesce.
-			this.flushEvents();
-			this.currentAssistantMessageSeq = ++this.assistantMessageSeq;
-			return;
-		}
-		if (event.type === "assistant_end") {
-			this.flushEvents();
-			this.currentAssistantMessageSeq = undefined;
-			return;
-		}
-		const record = toStreamRecord(event);
-		if (!record) return;
-		// 2 MB cap: drop thinking/text, keep tool_start/tool_end.
-		if ((record.kind === "thinking" || record.kind === "text") && this.fileBytes >= this.eventsCap) return;
-		const key = `${this.currentAssistantMessageSeq ?? 0}\0${record.kind}\0${record.blockId ?? ""}`;
-		// Flush when the kind (or blockId) changes so a reader never sees a
-		// stale open block interleaved with a new one.
-		if (this.buf.length > 0 && key !== this.bufKey) this.flushEvents();
-		this.seq += 1;
-		const line: ChildStreamLine = {
-			v: 1,
-			seq: this.seq,
-			ts: Date.now(),
-			runId: this.agent.agentId,
-			...(this.currentAssistantMessageSeq !== undefined ? { messageSeq: this.currentAssistantMessageSeq } : {}),
-			kind: record.kind,
-			...(record.blockId !== undefined ? { blockId: record.blockId } : {}),
-			...(record.text !== undefined ? { text: record.text } : {}),
-			...(record.toolName !== undefined ? { toolName: record.toolName } : {}),
-			...(record.toolCallId !== undefined ? { toolCallId: record.toolCallId } : {}),
-			...(record.argsPreview !== undefined ? { argsPreview: record.argsPreview } : {}),
-			...(record.timeoutSeconds !== undefined ? { timeoutSeconds: record.timeoutSeconds } : {}),
-			...(record.isError !== undefined ? { isError: record.isError } : {}),
-		};
-		const serialized = `${JSON.stringify(line)}\n`;
-		const bytes = Buffer.byteLength(serialized, "utf8");
-		this.buf.push({ line: serialized, kind: record.kind, bytes });
-		this.bufBytes += bytes;
-		this.bufKey = key;
-		if (this.bufBytes >= this.maxBuffered) {
-			this.flushEvents();
-		} else if (Date.now() - this.lastFlush >= this.flushInterval) {
-			this.flushEvents();
-		} else {
-			this.scheduleFlush();
-		}
+		if (observation.emitStream) this.eventWriter.append(event);
 	}
 
-	/** Write the buffered lines (one O_APPEND open per flush, never per token, never fsync). */
+	/** Public compatibility method for flush before terminal status snapshots. */
 	flushEvents(): void {
-		if (this.flushTimer) {
-			clearTimeout(this.flushTimer);
-			this.flushTimer = undefined;
-		}
-		if (this.buf.length === 0 || !this.eventsWritable) {
-			if (!this.eventsWritable) {
-				this.buf = [];
-				this.bufBytes = 0;
-				this.bufKey = "";
-			}
-			return;
-		}
-		// Apply the 2 MB cap line-by-line at write time against the projected
-		// total, so the file never grows past the cap; thinking/text past it are
-		// dropped while tool lines in the same flush still land.
-		let chunk = "";
-		let bytes = 0;
-		for (const entry of this.buf) {
-			if (
-				(entry.kind === "thinking" || entry.kind === "text") &&
-				this.fileBytes + bytes + entry.bytes >= this.eventsCap
-			) {
-				continue;
-			}
-			chunk += entry.line;
-			bytes += entry.bytes;
-		}
-		this.buf = [];
-		this.bufBytes = 0;
-		this.bufKey = "";
-		this.lastFlush = Date.now();
-		if (!chunk) return;
-		try {
-			const fd = fs.openSync(this.eventsPath, fs.constants.O_WRONLY | fs.constants.O_APPEND | openNoFollow());
-			try {
-				fs.writeSync(fd, chunk);
-			} finally {
-				fs.closeSync(fd);
-			}
-			this.fileBytes += bytes;
-		} catch {
-			// Boundary write failed (removed dir, permissions, …) — stop writing
-			// events; the agent run and status.json are unaffected.
-			this.eventsWritable = false;
-		}
-	}
-
-	/** Create the stream file empty: O_APPEND|O_CREAT|O_EXCL|O_NOFOLLOW, 0600. */
-	private createEventsFile(): void {
-		try {
-			const fd = fs.openSync(
-				this.eventsPath,
-				fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_APPEND | openNoFollow(),
-				0o600,
-			);
-			fs.closeSync(fd);
-			try {
-				fs.chmodSync(this.eventsPath, 0o600);
-			} catch {
-				// Best effort on filesystems without POSIX modes.
-			}
-		} catch {
-			this.eventsWritable = false;
-		}
-	}
-
-	private scheduleFlush(): void {
-		if (this.flushTimer || this.buf.length === 0) return;
-		const wait = Math.max(0, this.flushInterval - (Date.now() - this.lastFlush));
-		this.flushTimer = setTimeout(() => {
-			this.flushTimer = undefined;
-			this.flushEvents();
-		}, wait);
-		this.flushTimer.unref?.();
+		this.eventWriter.flush();
 	}
 
 	start(): void {

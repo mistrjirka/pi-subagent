@@ -33,8 +33,21 @@ import { reportedAgentState } from "./agent-state.js";
 import { randomUUID } from "node:crypto";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import {
+	AskParentParamsSchema,
+	buildSpawnParamsSchema,
+	canDelegate,
+	InspectParamsSchema,
+	SendParamsSchema,
+	type SpawnParams,
+	StopParamsSchema,
+	WaitParamsSchema,
+} from "./tool-params.js";
+
+export { buildSpawnParamsSchema, canDelegate, shouldRunInBackground } from "./tool-params.js";
+
 import { AgentProcess } from "./agent-process.js";
 import {
 	type AgentActivity,
@@ -45,19 +58,13 @@ import {
 } from "./event-interpret.js";
 import { ExternalControlBridge } from "./external-control.js";
 import { createLiveChannels } from "./live-output.js";
-import { resolveModel } from "./model.js";
 import {
 	completionContextContent,
 	maybeWriteFullOutput,
 	notifyCompletion,
 	truncateForContext,
 } from "./notification.js";
-import {
-	discoverAgentProfiles,
-	formatAvailableProfiles,
-	parseAllowedSubagentsEnv,
-	resolveAgentProfile,
-} from "./profiles.js";
+import { discoverAgentProfiles, parseAllowedSubagentsEnv } from "./profiles.js";
 import { type AgentMessage, type AgentQuestion, formatFrom, formatParentMessage } from "./protocol.js";
 import { RecoveryStore } from "./recovery.js";
 import {
@@ -69,6 +76,7 @@ import {
 	type WidgetSurface,
 } from "./registry.js";
 import { renderNotification } from "./render.js";
+import { SpawnCoordinator } from "./spawn-coordinator.js";
 import { runSpawnSession, type SpawnOutcome } from "./spawn-session.js";
 import { getMonitoringTranscript, IncrementalTranscriptCursor } from "./transcript.js";
 import { createSubtreeDisplay } from "./tree-display.js";
@@ -123,12 +131,11 @@ let widget: AgentWidget | null = null;
  */
 let uiRef: { setStatus(key: string, text: string | undefined): void } | undefined;
 
-function ensureWidget(ctx: { mode: string; ui: unknown }): AgentWidget | null {
+function ensureWidget(ctx: { mode: string; ui: ExtensionUIContext }): AgentWidget | null {
 	captureUi(ctx);
 	if (widget) return widget;
 	if (ctx.mode !== "tui") return null;
-	// biome-ignore lint/suspicious/noExplicitAny: ExtensionUIContext shape from pi
-	widget = new AgentWidget(ctx.ui as any);
+	widget = new AgentWidget(ctx.ui);
 	return widget;
 }
 
@@ -139,8 +146,8 @@ function ensureWidget(ctx: { mode: string; ui: unknown }): AgentWidget | null {
  * must have run its own execute before it can spawn children, so the ref
  * is always warm before any inbound @parent message needs to go up.
  */
-function captureUi(ctx: { mode: string; ui: unknown }): void {
-	uiRef = ctx.ui as { setStatus(key: string, text: string | undefined): void };
+function captureUi(ctx: { mode: string; ui: ExtensionUIContext }): void {
+	uiRef = ctx.ui;
 }
 
 /** Narrow TUI adapter: AgentWidget → WidgetSurface (registry seam). */
@@ -206,161 +213,7 @@ function createTreeTelemetry(hasParent: boolean) {
 	};
 }
 
-/** agent_spawn tool params. Execution policy comes from the named profile/settings, not the call. */
-interface SpawnParams {
-	agent: string;
-	prompt: string;
-	label?: string;
-	run_in_background?: boolean;
-	persistent?: boolean;
-	/** Root-only: explicit id from agent_recover, requiring a new scoped prompt. */
-	resume_id?: string;
-}
-
-/** agent_wait tool params. */
-interface WaitParams {
-	agent_id: string;
-	timeout_seconds?: number;
-}
-
-interface InspectParams {
-	agent_id: string;
-	max_messages?: number;
-}
-
-/** agent_stop tool params. */
-interface StopParams {
-	agent_id: string;
-}
-
-/** agent_send tool params. */
-interface SendParams {
-	to: string;
-	message: string;
-	kind?: "instruction" | "diagnostic" | "urgent" | "answer";
-	evidence?: string;
-}
-
-interface AskParentParams {
-	question: string;
-	context?: string;
-}
-
-const SpawnAgentField = Type.String({
-	description:
-		'Exact name of a configured agent profile: a bundled profile (explore, implementer, debugging-duck by default, plus extended profiles when builtinAgents is "all") or a custom profile from ~/.pi/agent/agents or .pi/agents.',
-});
-const SpawnPromptField = Type.String({
-	description: "The delegated task. Role instructions come from the agent profile and do not need to be repeated here.",
-});
-const SpawnLabelField = Type.Optional(
-	Type.String({ description: "Optional short UI label. Defaults to the agent profile name." }),
-);
-
-/**
- * The model-facing spawn API intentionally has no model/thinking/tools/timeout
- * parameters. Those belong to settings/profile configuration; execution has no
- * framework-imposed task cap. Nested delegation is controlled by each profile's
- * allowed_subagents list.
- */
-export function canDelegate(hasParent: boolean, allowedSubagents: readonly string[]): boolean {
-	return !hasParent || allowedSubagents.length > 0;
-}
-
-export function shouldRunInBackground(hasParent: boolean, requested: boolean | undefined): boolean {
-	return hasParent ? false : requested !== false;
-}
-
-export function buildSpawnParamsSchema(hasParent: boolean): ReturnType<typeof Type.Object> {
-	return Type.Object({
-		agent: SpawnAgentField,
-		prompt: SpawnPromptField,
-		label: SpawnLabelField,
-		persistent: Type.Optional(
-			Type.Boolean({
-				description:
-					"If true, keep the child resident after it completes so the same context can be resumed with agent_send.",
-			}),
-		),
-		...(hasParent
-			? {}
-			: {
-					run_in_background: Type.Optional(
-						Type.Boolean({
-							description:
-								"Root-only execution choice. Omitted/true returns immediately in background; false waits in foreground. Nested agents are always foreground.",
-						}),
-					),
-					resume_id: Type.Optional(
-						Type.String({
-							description:
-								"Recovery id from agent_recover for the same project, Git branch, and role. Loads the saved child transcript and sends this prompt as a NEW turn; it never replays work automatically.",
-						}),
-					),
-				}),
-	});
-}
-
 const SpawnParamsSchema = buildSpawnParamsSchema(HAS_PARENT);
-
-const WaitParamsSchema = Type.Object({
-	agent_id: Type.String({ description: 'The direct child id to wait for (e.g. "@max").' }),
-	timeout_seconds: Type.Optional(
-		Type.Number({
-			minimum: 0,
-			description:
-				"Optional wait-window timeout in seconds. Expiry returns a live status snapshot and never stops the child. Omit for the default 180-second supervision window; 0 returns an immediate snapshot.",
-		}),
-	),
-});
-
-const InspectParamsSchema = Type.Object({
-	agent_id: Type.String({ description: 'The direct child id to inspect (e.g. "@max").' }),
-	max_messages: Type.Optional(
-		Type.Integer({
-			minimum: 1,
-			maximum: 30,
-			description:
-				"Maximum number of unread child conversation messages to return in this page. Defaults to 12; later unread messages remain for the next read.",
-		}),
-	),
-});
-
-const StopParamsSchema = Type.Object({
-	agent_id: Type.String({ description: 'The agent id to stop (e.g. "@max").' }),
-});
-
-const SendParamsSchema = Type.Object({
-	to: Type.String({
-		description:
-			'The agent id from agent_spawn (e.g. "@max" — a spawn result or completion ' +
-			'notification carries it), or "@parent" to message the session that spawned you.',
-	}),
-	message: Type.String({ description: "The message text." }),
-	kind: Type.Optional(
-		Type.Union(
-			[Type.Literal("instruction"), Type.Literal("diagnostic"), Type.Literal("urgent"), Type.Literal("answer")],
-			{
-				description:
-					"Set answer only to explicitly resolve a waiting ask_parent question. Diagnostic and urgent are for other instructions. Default instruction.",
-			},
-		),
-	),
-	evidence: Type.Optional(
-		Type.String({ description: "For kind=diagnostic, concrete fresh evidence: file, finding, and validation source." }),
-	),
-});
-
-const AskParentParamsSchema = Type.Object({
-	question: Type.String({
-		description: "The specific material question that blocks safe progress.",
-	}),
-	context: Type.Optional(
-		Type.String({
-			description: "Brief evidence/context explaining why the answer cannot safely be inferred.",
-		}),
-	),
-});
 
 // ─── Helpers ─────────────────────────────────────────────────
 
@@ -591,6 +444,13 @@ export default function (pi: ExtensionAPI) {
 		if (typeof respond === "function") respond(registry.checkpointRoster());
 	});
 	const childRecoveryIds = new Map<string, string>();
+	const spawnCoordinator = new SpawnCoordinator({
+		hasParent: HAS_PARENT,
+		allowedSubagents: ALLOWED_SUBAGENTS,
+		currentAgentProfile: CURRENT_AGENT_PROFILE,
+		parentAgentId: MY_AGENT_ID,
+		...(recovery ? { recovery } : {}),
+	});
 	// Every Pi session can own a resident child, even though only the root may
 	// spawn background work. Track the parent's actual active/settled window at
 	// every depth so resumed-child announcements cannot race a late agent_wait.
@@ -733,83 +593,25 @@ export default function (pi: ExtensionAPI) {
 
 			async execute(_toolCallId, raw, signal, onUpdate, ctx) {
 				captureUi(ctx);
-				const params = raw as unknown as SpawnParams;
-				const requestedAgent = params.agent?.trim();
-				if (!requestedAgent) {
-					return toErrorResult("`agent` is required.");
-				}
-				const catalog = discoverAgentProfiles(ctx.cwd);
-				const profile = catalog.profiles.get(requestedAgent);
-				if (!profile) {
-					return toErrorResult(
-						`Unknown agent profile ${JSON.stringify(requestedAgent)}. Available: ${formatAvailableProfiles(catalog)}`,
-					);
-				}
-				if (HAS_PARENT && !ALLOWED_SUBAGENTS.includes(profile.name)) {
-					const allowed = ALLOWED_SUBAGENTS.length ? ALLOWED_SUBAGENTS.join(", ") : "none";
-					return toErrorResult(
-						`Agent ${JSON.stringify(CURRENT_AGENT_PROFILE || MY_AGENT_ID)} cannot spawn ${JSON.stringify(profile.name)}. Allowed subagents: ${allowed}.`,
-					);
-				}
-				const runtimeProfile = resolveAgentProfile(profile, ctx.cwd);
-				// Label is cosmetic; profile identity controls behavior/delegation.
-				const label = params.label?.trim() || profile.name;
-				// Schema hides run_in_background from sub-agents; this guard catches
-				// hallucinated args (schema validation may pass extras through).
-				if (HAS_PARENT && params.run_in_background != null) {
+				const params = raw as SpawnParams;
+				const decision = spawnCoordinator.prepare(params, {
+					cwd: ctx.cwd,
+					modelRegistry: ctx.modelRegistry,
+					model: ctx.model,
+				});
+				if (decision.kind === "rejected")
 					return {
-						content: [
-							{
-								type: "text",
-								text:
-									"run_in_background is root-only: your lifetime ends when this call returns, so " +
-									"background work could not outlive you nor deliver its result. For parallel " +
-									"work, issue several foreground agent_spawn calls together (they run " +
-									"concurrently); for long-running work, describe it in your reply so the " +
-									"caller can decide.",
-							},
-						],
-						details: { error: "background spawns are root-only", label },
+						content: [{ type: "text", text: decision.message }],
+						details: {
+							...(decision.runInBackground ? { runInBackground: true, label: decision.label } : {}),
+							...(decision.error === "background spawns are root-only" ? { label: decision.label } : {}),
+							error: decision.error,
+						},
 						isError: true,
 					};
-				}
-				const runInBackground = shouldRunInBackground(HAS_PARENT, params.run_in_background);
-				const task = params.prompt?.trim();
-				if (!task) {
-					return {
-						content: [{ type: "text", text: "`prompt` is required." }],
-						details: { error: "`prompt` is required." },
-						isError: true,
-					};
-				}
-
-				const resolved = resolveModel(ctx.modelRegistry, ctx.model, runtimeProfile.resolvedModel);
-				if (resolved.error) {
-					// Background: render as the status line `Agent <label> start failed:
-					// <reason>` (the id never exists yet — spawn didn't happen).
-					return {
-						content: [{ type: "text", text: resolved.error }],
-						details: runInBackground
-							? { runInBackground: true, label, error: resolved.error }
-							: { error: resolved.error },
-						isError: true,
-					};
-				}
-
-				// Recovery is an explicit, root-only continuation. Claim the saved
-				// transcript before launching Pi, so a second session cannot write it.
-				let recoveryId: string | undefined;
-				let resumeSessionPath: string | undefined;
-				if (params.resume_id) {
-					if (!recovery) return toErrorResult("Only a root session can recover a persistent child.");
-					try {
-						const record = recovery.resume(params.resume_id, ctx.cwd, profile.name, resolved.model ?? "inherited");
-						recoveryId = record.id;
-						resumeSessionPath = record.sessionPath;
-					} catch (error) {
-						return toErrorResult(error);
-					}
-				}
+				const { profile, runtimeProfile, label, task, runInBackground, resolved } = decision;
+				let recoveryId = decision.recoveryId;
+				const resumeSessionPath = decision.resumeSessionPath;
 
 				const startedAt = Date.now();
 
@@ -1359,7 +1161,7 @@ export default function (pi: ExtensionAPI) {
 
 		async execute(_toolCallId, raw, signal, onUpdate, ctx) {
 			captureUi(ctx);
-			const params = raw as WaitParams;
+			const params = raw;
 			const rawId = params.agent_id?.trim();
 			const agentId = rawId?.replace(/^@/, "");
 			if (!agentId) return toErrorResult("`agent_id` is required.");
@@ -1517,7 +1319,7 @@ export default function (pi: ExtensionAPI) {
 
 		async execute(_toolCallId, raw, _signal, _onUpdate, ctx) {
 			captureUi(ctx);
-			const params = raw as InspectParams;
+			const params = raw;
 			const rawId = params.agent_id?.trim();
 			const agentId = rawId?.replace(/^@/, "");
 			if (!agentId) return toErrorResult("`agent_id` is required.");
@@ -1605,7 +1407,7 @@ export default function (pi: ExtensionAPI) {
 
 		async execute(_toolCallId, raw, _signal, onUpdate) {
 			// No captureUi here: agent_stop never sends upward (no child→parent path).
-			const params = raw as StopParams;
+			const params = raw;
 			// Honour the @ reference form we teach — strip once, use everywhere
 			// (lookup, stopAndRemove, details) so no @@ double prefix appears.
 			const agentId = params.agent_id.replace(/^@/, "");
@@ -1681,7 +1483,7 @@ export default function (pi: ExtensionAPI) {
 
 		async execute(_toolCallId, raw, _signal, onUpdate, ctx) {
 			captureUi(ctx);
-			const params = raw as SendParams;
+			const params = raw;
 			const to = params.to?.trim();
 			const message = params.message?.trim();
 			// Honour the @ reference form we teach — but never strip @parent
@@ -1789,7 +1591,7 @@ ${registry.describeMessageTargets(target)}`
 
 			async execute(_toolCallId, raw, _signal, _onUpdate, ctx) {
 				captureUi(ctx);
-				const params = raw as AskParentParams;
+				const params = raw;
 				const question = params.question?.trim();
 				const context = params.context?.trim();
 				if (!question) return toErrorResult("`question` is required.");

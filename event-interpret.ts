@@ -45,7 +45,7 @@ export type AgentActivity =
 export type AgentEvent =
 	| { type: "settled" }
 	| { type: "assistant_start" }
-	| { type: "assistant_end" }
+	| { type: "assistant_end"; windowTokens?: number }
 	| { type: "thinking"; text?: string; contentIndex?: number }
 	| { type: "tool_start"; toolCallId: string; toolName: string; contentIndex?: number }
 	| { type: "tool_call"; activity: Extract<AgentActivity, { kind: "tool" }>; contentIndex?: number }
@@ -140,7 +140,26 @@ export function interpretEvent(raw: RpcEvent): AgentEvent[] {
 				? (raw.message as Record<string, unknown>)
 				: undefined;
 		if (message?.role === "assistant") {
-			return [{ type: raw.type === "message_start" ? "assistant_start" : "assistant_end" }];
+			if (raw.type === "message_start") return [{ type: "assistant_start" }];
+			// Usage arrives on the finalized assistant message. Read it once at
+			// the protocol boundary rather than re-parsing the whole session.
+			const usage = message.usage;
+			const u =
+				usage && typeof usage === "object" && !Array.isArray(usage) ? (usage as Record<string, unknown>) : undefined;
+			const tokens = [u?.input, u?.cacheRead, u?.cacheWrite];
+			const windowTokens = tokens.every(
+				(token) => token === undefined || (typeof token === "number" && Number.isSafeInteger(token) && token >= 0),
+			)
+				? tokens.reduce<number>((sum, token) => sum + (typeof token === "number" ? token : 0), 0)
+				: undefined;
+			return [
+				{
+					type: "assistant_end",
+					...(windowTokens !== undefined && windowTokens > 0 && Number.isSafeInteger(windowTokens)
+						? { windowTokens }
+						: {}),
+				},
+			];
 		}
 		// Some extension tools persist a completed result but do not emit
 		// tool_execution_end. The finalized toolResult closes the status.

@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.5.16 — typed spawn coordinator and event-owned child telemetry
+
+- Publish child turn count, unique started-tool count, latest context window and real activity timestamp in optional v1 status fields. The status bridge now uses `AgentTelemetryService` and does not scan Pi session history.
+- Extract spawn profile, delegation, root-only background and recovery admission into `SpawnCoordinator`, keeping the existing spawn lifecycle and notification policy unchanged.
+- Define tool argument types from TypeBox schemas rather than duplicate handwritten interfaces. Use inferred arguments where possible and a single cast at the runtime-dependent root/child spawn boundary.
+- Add typed ports and focused tests for telemetry, error paths, explicit recovery and profile policy. No active Pi child processes are restarted by this source release.
+
+Validation: 382 tests, TypeScript and Biome pass.
+
 ## 0.5.15 — do not show finished tools as still running
 
 - When Pi persists a final `toolResult` message, close the matching active command in the external status bridge even if the tool omitted `tool_execution_end` (observed with `code`).

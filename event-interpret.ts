@@ -51,6 +51,7 @@ export type AgentEvent =
 	| { type: "tool_call"; activity: Extract<AgentActivity, { kind: "tool" }>; contentIndex?: number }
 	| { type: "tool_execution_start"; toolCallId: string; toolName: string; argsPreview: string; timeoutSeconds?: number }
 	| { type: "tool_execution_end"; toolCallId: string; toolName: string; isError: boolean }
+	| { type: "tool_result_end"; toolCallId: string; toolName: string; isError: boolean }
 	| { type: "text_delta"; delta: string; contentIndex?: number }
 	| { type: "agent_failed"; error: string }
 	| { type: "agent_msg"; message: AgentMessage }
@@ -140,6 +141,15 @@ export function interpretEvent(raw: RpcEvent): AgentEvent[] {
 				: undefined;
 		if (message?.role === "assistant") {
 			return [{ type: raw.type === "message_start" ? "assistant_start" : "assistant_end" }];
+		}
+		// Some extension tools persist a completed result but do not emit
+		// tool_execution_end. The finalized toolResult closes the status.
+		if (raw.type === "message_end" && message?.role === "toolResult") {
+			const id = message.toolCallId;
+			const name = message.toolName;
+			if (typeof id === "string" && id.length > 0 && typeof name === "string" && name.length > 0) {
+				return [{ type: "tool_result_end", toolCallId: id, toolName: name, isError: message.isError === true }];
+			}
 		}
 		return [];
 	}

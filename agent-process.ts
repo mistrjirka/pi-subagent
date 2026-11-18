@@ -543,6 +543,7 @@ export class AgentProcess {
 				}
 				case "tool_execution_start":
 				case "tool_execution_end":
+				case "tool_result_end":
 				case "tool_start":
 					// Stream-only: the fold waits for toolcall_end (authoritative args).
 					this.onStream?.(ev);

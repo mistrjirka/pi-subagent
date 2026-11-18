@@ -156,6 +156,8 @@ function toStreamRecord(event: AgentEvent):
 			};
 		case "tool_execution_end":
 			return { kind: "tool_end", toolName: event.toolName, toolCallId: event.toolCallId, isError: event.isError };
+		case "tool_result_end":
+			return { kind: "tool_end", toolName: event.toolName, toolCallId: event.toolCallId, isError: event.isError };
 		default:
 			return undefined;
 	}
@@ -268,6 +270,15 @@ export class ExternalControlBridge {
 			});
 			this.writeStatus();
 		} else if (event.type === "tool_execution_end") {
+			const active = this.activeTools.get(event.toolCallId);
+			if (!active || active.toolName !== event.toolName) return;
+			this.activeTools.delete(event.toolCallId);
+			this.writeStatus();
+		} else if (event.type === "tool_result_end") {
+			// A persisted tool result closes the call even without an execution-end.
+			// Only emit once; ordinary tools already ended on the earlier event.
+			const active = this.activeTools.get(event.toolCallId);
+			if (!active || active.toolName !== event.toolName) return;
 			this.activeTools.delete(event.toolCallId);
 			this.writeStatus();
 		}

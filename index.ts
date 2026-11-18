@@ -583,6 +583,13 @@ export default function (pi: ExtensionAPI) {
 				expandTilde(process.env.PI_CODING_AGENT_DIR || path.join(os.homedir(), ".pi", "agent")),
 				SUBAGENT_SESSION_DIR,
 			);
+	// Both extensions share the current Pi event bus. Only a small, synchronous
+	// snapshot is sent. Child transcripts and tool results remain private.
+	pi.events.on("pi-subagent:checkpoint-roster:v1", (value: unknown) => {
+		if (!value || typeof value !== "object") return;
+		const respond = (value as { respond?: unknown }).respond;
+		if (typeof respond === "function") respond(registry.checkpointRoster());
+	});
 	const childRecoveryIds = new Map<string, string>();
 	// Every Pi session can own a resident child, even though only the root may
 	// spawn background work. Track the parent's actual active/settled window at
@@ -902,6 +909,7 @@ export default function (pi: ExtensionAPI) {
 					thinking: runtimeProfile.resolvedThinking ?? pi.getThinkingLevel(),
 					appendSystemPrompt: runtimeProfile.prompt || undefined,
 					label,
+					taskSummary: task,
 					sessionDir: SUBAGENT_SESSION_DIR,
 					resumeSessionPath,
 					// Resident after completion (idle, zero token) — explicit opt-in.

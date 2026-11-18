@@ -31,6 +31,7 @@ import type { RenderEvent } from "./types.js";
 export interface RegisteredAgent {
 	readonly agentId: string;
 	readonly label: string;
+	readonly taskSummary?: string;
 	readonly model?: string;
 	readonly thinking?: string;
 	readonly startedAt?: number;
@@ -241,6 +242,32 @@ export class AgentRegistry {
 
 	lookup(agentId: string): RegisteredAgent | undefined {
 		return this.agents.get(agentId);
+	}
+
+	/** Snapshot used by compaction. It never reads child transcripts or changes the registry. */
+	checkpointRoster(limit = 24): {
+		v: 1;
+		total: number;
+		agents: Array<{ id: string; label: string; description: string; state: "running" | "waiting" | "idle" }>;
+	} {
+		const active = [...this.agents.values()].filter(
+			(agent) => !agent.stoppedByControl && agent.status !== "failed" && agent.status !== "stopped",
+		);
+		const state = (agent: RegisteredAgent): "running" | "waiting" | "idle" =>
+			agent.awaitingParent ? "waiting" : agent.status === "completed" ? "idle" : "running";
+		const priority = { waiting: 0, running: 1, idle: 2 };
+		active.sort((a, b) => priority[state(a)] - priority[state(b)]);
+		const compact = (value: string, length: number) => value.replace(/\s+/g, " ").trim().slice(0, length);
+		return {
+			v: 1,
+			total: active.length,
+			agents: active.slice(0, Math.max(1, Math.min(24, limit))).map((agent) => ({
+				id: agent.agentId,
+				label: compact(agent.label, 80),
+				description: compact(agent.taskSummary ?? "", 120),
+				state: state(agent),
+			})),
+		};
 	}
 
 	/**

@@ -203,6 +203,13 @@ function makeAgent(options: Partial<AgentProcessOptions> & { cwd: string }): { a
 }
 
 describe("AgentProcess — spawnAndSend", () => {
+	it("stores only a short, single-line task preview for compaction", () => {
+		const { agent } = makeAgent({ cwd: "/tmp", taskSummary: "  Fix cache\n invalidation ".repeat(20) });
+		assert.ok((agent.taskSummary?.length ?? 0) <= 140);
+		assert.doesNotMatch(agent.taskSummary ?? "", /\n/);
+		assert.match(agent.taskSummary ?? "", /^Fix cache invalidation/);
+	});
+
 	it("moves to running and captures session info on prompt ack", async () => {
 		const { agent, fake } = makeAgent({ cwd: "/tmp", label: "my task" });
 		const started = await agent.spawnAndSend("do it");

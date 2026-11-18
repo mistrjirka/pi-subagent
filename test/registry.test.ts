@@ -174,6 +174,36 @@ describe("AgentRegistry — tracking", () => {
 		assert.equal(registry.lookup("nope"), undefined);
 	});
 
+	it("checkpoint roster includes only live children and prioritizes waiting workers", async () => {
+		const { registry } = makeRegistry();
+		const running = new FakeAgent("sage", "Implementation");
+		(running as FakeAgent & { taskSummary: string }).taskSummary = "  Fix storage\n and cache invalidation ".repeat(10);
+		registry.register(running);
+		const waiting = new FakeAgent("kim", "Review");
+		waiting.awaitingParent = true;
+		registry.register(waiting);
+		const idle = new FakeAgent("leo", "Tests", true);
+		idle.status = "completed";
+		registry.register(idle, "idle");
+		const done = new FakeAgent("ivy", "Done");
+		registry.register(done);
+		await registry.complete(done, completion());
+		const snapshot = registry.checkpointRoster(2);
+		assert.equal(snapshot.v, 1);
+		assert.equal(snapshot.total, 3);
+		assert.deepEqual(
+			snapshot.agents.map((agent) => [agent.id, agent.state]),
+			[
+				["kim", "waiting"],
+				["sage", "running"],
+			],
+		);
+		assert.ok((snapshot.agents[1]?.description.length ?? 0) <= 120);
+		assert.doesNotMatch(snapshot.agents[1]?.description ?? "", /\n/);
+		assert.equal(registry.lookup("leo"), idle);
+		assert.ok(registry.peekSettlement("ivy"));
+	});
+
 	it("a failed send can list running, resident and exited direct children", async () => {
 		const { registry } = makeRegistry();
 		const running = new FakeAgent("blair", "stage-1");

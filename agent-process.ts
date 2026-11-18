@@ -60,6 +60,8 @@ export interface AgentProcessOptions {
 	appendSystemPrompt?: string;
 	/** Short task label (notification card). */
 	label: string;
+	/** Task preview for compaction, not a transcript or full prompt. */
+	taskSummary?: string;
 	/** Short human-readable id ("max", "zoe") assigned by the registry (name-gen.ts). */
 	agentId: string;
 	/** Custom session storage dir (--session-dir) — keeps sub-agent sessions out of `pi -r`. */
@@ -104,6 +106,7 @@ const STARTUP_PROMPT_TIMEOUT_MS = 60_000;
 export class AgentProcess {
 	readonly agentId: string;
 	readonly label: string;
+	readonly taskSummary: string | undefined;
 	readonly startedAt = Date.now();
 	readonly model: string | undefined;
 	readonly thinking: string | undefined;
@@ -151,6 +154,7 @@ export class AgentProcess {
 	constructor(options: AgentProcessOptions, deps: AgentProcessDeps = {}) {
 		this.agentId = options.agentId;
 		this.label = options.label;
+		this.taskSummary = options.taskSummary?.replace(/\s+/g, " ").trim().slice(0, 140);
 		this.model = options.model;
 		this.thinking = options.thinking;
 		this.persistent = options.persistent ?? false;

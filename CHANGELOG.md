@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.5.14 — compact live-agent roster for checkpoint handoff
+
+- Answer a synchronous in-process snapshot request with only direct active workers, their short names, states, labels, and bounded task descriptions. The extension does not read or duplicate child transcripts.
+- Include waiting and reusable idle workers, and exclude exited or explicitly stopped workers. Prioritize waiting workers.
+- Works with pi-one-round-compaction 0.4.4 to preserve active worker identities inside its post-compaction token target.
+- The read-only `agent_list` tool remains available for current details after compaction.
+
+Validation: all tests, TypeScript, and Biome pass.
+
 ## 0.5.13 — reliable large-session recovery and compaction rediscovery
 
 - Verify a recovered child's exact Pi session path and its nonempty `get_session_stats.totalMessages` count before sending a fresh prompt. The previous `get_messages` check serialized entire tool-heavy sessions and could fail or time out on very large histories.

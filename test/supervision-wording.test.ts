@@ -3,13 +3,15 @@ import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 
 const indexSource = readFileSync(new URL("../index.ts", import.meta.url), "utf8");
+const monitoringSource = readFileSync(new URL("../monitoring-tools.ts", import.meta.url), "utf8");
+const toolSource = indexSource + "\n" + monitoringSource;
 const readmeSource = readFileSync(new URL("../README.md", import.meta.url), "utf8");
 
 describe("supervision wording stays plain", () => {
 	it("keeps triage jargon out of index.ts reader-facing strings", () => {
-		assert.ok(!/\bhealthy\b/i.test(indexSource), "index.ts still contains HEALTHY");
-		assert.ok(!/\bstalled\b/i.test(indexSource), "index.ts still contains STALLED");
-		assert.ok(!/\bdrifting\b/i.test(indexSource), "index.ts still contains DRIFTING");
+		assert.ok(!/\bhealthy\b/i.test(toolSource), "tool sources still contain HEALTHY");
+		assert.ok(!/\bstalled\b/i.test(toolSource), "tool sources still contain STALLED");
+		assert.ok(!/\bdrifting\b/i.test(toolSource), "tool sources still contain DRIFTING");
 	});
 
 	it("keeps triage jargon out of README reader-facing strings", () => {
@@ -20,7 +22,7 @@ describe("supervision wording stays plain", () => {
 
 	it("guides progress checks with concrete signals and actions", () => {
 		for (const [name, source] of [
-			["index.ts", indexSource],
+			["extension tool sources", toolSource],
 			["README.md", readmeSource],
 		] as const) {
 			assert.ok(source.includes("making real progress"), `${name} lost the progress question`);
@@ -47,8 +49,8 @@ describe("supervision wording stays plain", () => {
 	it("keeps the supervision mechanism facts intact", () => {
 		assert.ok(indexSource.includes('"subagent-supervision"'), "reminder customType changed");
 		assert.ok(indexSource.includes("normally a 150-second window"), "reminder lost the 150-second cadence");
-		assert.ok(indexSource.includes("unread transcript page"), "guidelines lost unread transcript paging");
-		assert.ok(indexSource.includes("180-second supervision window"), "guidelines lost the 180-second default");
+		assert.ok(toolSource.includes("unread transcript page"), "guidelines lost unread transcript paging");
+		assert.ok(toolSource.includes("180-second supervision window"), "guidelines lost the 180-second default");
 		assert.ok(readmeSource.includes("180-second default"), "README lost the 180-second default");
 		assert.ok(readmeSource.includes("get_entries(since)"), "README lost the stable entry cursor contract");
 	});

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.18 — prevent redundant parent turns after child progress
+
+- A normal child completion that follows a parent-visible `agent_send` update from the same child is still displayed and saved, but uses `triggerTurn: false` so it does not start a second parent model request after the answer. This specifically addresses the late Rona progress/completion sequence in SBHG Buddy.
+- Unconsumed completions without an earlier delivered update retain the existing proactive parent wake-up. A progress message merely queued, a diagnostic ping, or a report from another child does not suppress the wake-up.
+- Track delivery through parent tool results, `agent_wait`, live routing, and deferred `turn_end`/`agent_settled` messages. Reset receipts on a new child task and restore them when `agent_send` fails. `ask_parent` questions remain immediate.
+- Add regression tests for settlement-before-progress ordering, old queued messages, cross-child isolation, failed sends, resident re-use, urgent questions and the exact Pi `sendMessage` delivery options.
+
+
 ## 0.5.17 — extract spawn-result presentation
 
 - Move background-start, completed, resident, failed/stopped, and `ask_parent` tool response formatting out of the agent spawn handler into typed `spawn-result.ts`.

@@ -56,7 +56,12 @@ export function completionContextContent(agent: RegisteredAgent, completion: Age
 }
 
 /** Deliver a completion notification: LLM JSON at the next safe boundary + user card. */
-export function notifyCompletion(pi: ExtensionAPI, agent: RegisteredAgent, completion: AgentCompletion): void {
+export function notifyCompletion(
+	pi: ExtensionAPI,
+	agent: RegisteredAgent,
+	completion: AgentCompletion,
+	delivery: { triggerTurn: boolean } = { triggerTurn: true },
+): void {
 	const details: NotificationDetails = {
 		status: completion.status,
 		agent_id: agent.agentId,
@@ -87,6 +92,6 @@ export function notifyCompletion(pi: ExtensionAPI, agent: RegisteredAgent, compl
 			display: true,
 			details,
 		},
-		{ deliverAs: "steer", triggerTurn: true },
+		{ deliverAs: "steer", triggerTurn: delivery.triggerTurn },
 	);
 }

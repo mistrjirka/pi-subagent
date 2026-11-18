@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.5.25 — split the spawn entrypoint into typed modules
+
+- Extract the `agent_spawn` tool registration, live card wiring, control bridge and completion branches to `spawn-tool.ts`, leaving `index.ts` responsible for root registry and shared extension lifecycle.
+- Define explicit `SpawnToolPorts` and `TreeTelemetry` interfaces. Use schema-derived `SpawnParams` directly, with no new unsafe casts or runtime type guessing.
+- Keep callbacks bound to the concrete `AgentProcess` rather than downcasting a structural `SpawnSessionAgent` in background/resident callbacks.
+- Extract the exact child environment variables and inherited ancestor chain to `spawn-identity.ts`, with tests that catch mistaken variable names and lost tree identity.
+- Reduce `index.ts` from 752 to 311 lines. Move source-inspection supervision tests to the new module without changing the Rona notification policy, recovery leases or agent lifecycle semantics.
+
+Validation: 434 tests passed with bounded test concurrency, TypeScript and Biome pass. Source changes do not restart running agents.
+
 ## 0.5.24 — further split entrypoint lifecycle and recovery
 
 - Move read-only `agent_list` and `agent_recover` registration to `discovery-tools.ts`, deriving argument types from one TypeBox schema rather than casting decoded input.

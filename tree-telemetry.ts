@@ -14,11 +14,18 @@ import { type AgentActivity, type AgentTreeEvent, TREE_STATUS_KEY } from "./even
  * background row's subtree never leaks into a card — one subtree, one
  * surface (SPEC: 显示面统一规则).
  */
+export interface TreeTelemetry {
+	report(event: AgentTreeEvent): void;
+	add(agent: { agentId: string; label: string; startedAt: number }, status: "running" | "idle"): void;
+	activity(agent: { agentId: string; getLatestActivity(): AgentActivity | undefined }): void;
+	remove(agentId: string, status: "done" | "failed" | "stopped"): void;
+}
+
 export function createTreeTelemetry(
 	hasParent: boolean,
 	ownAgentId: string,
 	status: (key: string, value: string) => void,
-) {
+): TreeTelemetry {
 	/** Ids reported as added — guards activity/remove so unknown ids never
 	 *  emit telemetry. */
 	const tracked = new Set<string>();

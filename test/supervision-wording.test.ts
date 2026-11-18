@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 
 const indexSource = readFileSync(new URL("../index.ts", import.meta.url), "utf8");
+const spawnToolSource = readFileSync(new URL("../spawn-tool.ts", import.meta.url), "utf8");
 const parentDeliverySource = readFileSync(new URL("../parent-delivery.ts", import.meta.url), "utf8");
 const supervisionReminderSource = readFileSync(new URL("../supervision-reminder.ts", import.meta.url), "utf8");
 const monitoringSource = readFileSync(new URL("../monitoring-tools.ts", import.meta.url), "utf8");
@@ -71,10 +72,10 @@ describe("supervision wording stays plain", () => {
 	});
 
 	it("records resumed child completion before normal cleanup", () => {
-		const start = indexSource.indexOf("onIdle: (outcome, generation) => {");
-		const end = indexSource.indexOf("// Where live output goes", start);
+		const start = spawnToolSource.indexOf("onIdle: (outcome, generation) => {");
+		const end = spawnToolSource.indexOf("// Where live output goes", start);
 		assert.ok(start >= 0 && end > start, "could not locate resumed-child lifecycle block");
-		const onIdle = indexSource.slice(start, end);
+		const onIdle = spawnToolSource.slice(start, end);
 		assert.ok(onIdle.includes('wakeCompletion("completed", generation)'), "resumed completion is not collected");
 		assert.ok(
 			onIdle.includes("registry.complete(agent, completion)"),

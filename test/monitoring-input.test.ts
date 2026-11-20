@@ -170,11 +170,22 @@ describe("agent_wait user input", () => {
 		});
 	}
 
-	it("ignores follow-ups, generated input, other sessions, and events before input acceptance", async (t) => {
+	it("wakes for accepted follow-ups as well as steering without stopping the child", async (t) => {
 		const h = harness(t);
 		const child = h.child();
 		const pending = h.run();
-		h.input({ mode: "followUp" });
+		h.input({ mode: "followUp", source: "rpc" });
+		const result = await pending;
+		assert.equal(result.details.interruptedByUser, true);
+		assert.equal(child.stopCalls, 0);
+		assert.equal(child.agent.status, "running");
+	});
+
+	it("ignores generated input, other sessions, and events before input acceptance", async (t) => {
+		const h = harness(t);
+		const child = h.child();
+		const pending = h.run();
+		h.input({ mode: "followUp", source: "extension" });
 		h.input({ source: "extension" });
 		h.input({}, "parent-b");
 		h.emit("input", { source: "rpc", text: "not yet accepted" });

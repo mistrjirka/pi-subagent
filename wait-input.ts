@@ -30,7 +30,11 @@ export function registerWaitInput(pi: ExtensionAPI): {
 	const active = new Set<ActiveWait>();
 	const onInputQueued = pi.on.bind(pi) as unknown as InputQueuedAPI["on"];
 	onInputQueued("input_queued", (event, ctx) => {
-		if (event.mode !== "steer" || (event.source !== "rpc" && event.source !== "interactive")) return;
+		if (
+			(event.mode !== "steer" && event.mode !== "followUp") ||
+			(event.source !== "rpc" && event.source !== "interactive")
+		)
+			return;
 		const sessionId = ctx.sessionManager.getSessionId();
 		for (const wait of active) {
 			if (wait.sessionId === sessionId) wait.interrupt();

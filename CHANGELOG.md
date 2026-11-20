@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.27 — release wait for follow-up messages
+
+- Release `agent_wait` for any accepted user input from RPC or interactive mode, including queued follow-ups, without stopping child agents.
+- Keep rejected input, extension-generated input, and input for other sessions from interrupting the wait.
+- Add unit and real-process regressions for follow-up delivery while child agents remain running.
+
+Validation: 445 tests and real managed-Pi subprocess checks.
+
 ## 0.5.26 — release parent waits for user input
 
 - Release active `agent_wait` calls when accepted user steering input arrives in the same session. The tool returns the current child state and `interruptedByUser: true`, while child agents keep running and Pi delivers the queued message.

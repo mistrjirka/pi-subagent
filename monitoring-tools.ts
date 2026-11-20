@@ -42,7 +42,7 @@ export function registerMonitoringTools(pi: ExtensionAPI, ports: MonitoringPorts
 		name: "agent_wait",
 		label: "Wait for Agent",
 		description:
-			"Wait for a direct child to settle, fail/stop, ask its parent a question, or receive any child message to @parent. Child messages wake the wait immediately. Accepted user steering also releases the wait when supported by the host. timeout_seconds limits this call; expiry shows newest progress. None stops the child. Default 180 seconds.",
+			"Wait for a direct child to settle, fail/stop, ask its parent a question, or receive any child message to @parent. Child messages wake the wait immediately. Accepted user messages (steering and follow-ups) also release the wait when supported by the host. timeout_seconds limits this call; expiry shows newest progress. None stops the child. Default 180 seconds.",
 		promptSnippet: "Wait for a background or resumed child to settle",
 		promptGuidelines: [
 			"Use agent_wait when a background child's result becomes the next dependency instead of shell sleep or polling. This applies to subagents, not ordinary external processes with process/job wait mechanisms. Use completion results already delivered rather than fetching them again.",

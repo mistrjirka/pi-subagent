@@ -1,0 +1,307 @@
+import assert from "node:assert/strict";
+import { getEventListeners } from "node:events";
+import { describe, it, type TestContext } from "node:test";
+import { setImmediate } from "node:timers/promises";
+import type { ExtensionAPI, ExtensionUIContext } from "@earendil-works/pi-coding-agent";
+import { type MonitoringPorts, registerMonitoringTools } from "../monitoring-tools.js";
+import { AgentRegistry, type RegisteredAgent } from "../registry.js";
+
+type ToolResult = {
+	content: Array<{ type: string; text: string }>;
+	details: Record<string, unknown>;
+	isError?: boolean;
+};
+type ToolContext = {
+	mode: string;
+	ui: ExtensionUIContext;
+	sessionManager: { getSessionId: () => string };
+};
+type RegisteredTool = {
+	name: string;
+	execute(
+		callId: string,
+		params: Record<string, unknown>,
+		signal: AbortSignal | undefined,
+		onUpdate: ((value: unknown) => void) | undefined,
+		ctx: ToolContext,
+	): Promise<ToolResult>;
+};
+type EventHandler = (event: Record<string, unknown>, ctx: ToolContext) => void;
+
+function context(sessionId: string): ToolContext {
+	return { mode: "rpc", ui: {} as ExtensionUIContext, sessionManager: { getSessionId: () => sessionId } };
+}
+
+function harness(t: TestContext) {
+	const tools = new Map<string, RegisteredTool>();
+	const handlers = new Map<string, EventHandler[]>();
+	const pi = {
+		registerTool(tool: RegisteredTool) {
+			tools.set(tool.name, tool);
+		},
+		on(event: string, handler: EventHandler) {
+			handlers.set(event, [...(handlers.get(event) ?? []), handler]);
+		},
+	} as unknown as ExtensionAPI;
+	const registry = new AgentRegistry({ notify: () => {}, supervisionIntervalMs: 0 });
+	t.after(() => registry.shutdown());
+	let transcriptReads = 0;
+	const ports: MonitoringPorts = {
+		registry,
+		captureUi: () => {},
+		unreadTranscript: async () => {
+			transcriptReads++;
+			return { text: "", source: "none", returnedMessages: 0, remainingMessages: 0, hasMore: false };
+		},
+		activitySummary: () => "working",
+		toErrorResult: (error) => ({
+			content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }],
+			details: {},
+			isError: true,
+		}),
+		hasParent: false,
+	};
+	registerMonitoringTools(pi, ports);
+
+	function emit(event: string, data: Record<string, unknown>, sessionId = "parent-a") {
+		for (const handler of handlers.get(event) ?? []) handler(data, context(sessionId));
+	}
+	return {
+		registry,
+		handlers,
+		get transcriptReads() {
+			return transcriptReads;
+		},
+		child(agentId = "bria") {
+			let stopCalls = 0;
+			const agent: RegisteredAgent = {
+				agentId,
+				label: "Implementer",
+				status: "running",
+				awaitingParent: false,
+				stoppedByControl: false,
+				persistent: true,
+				stop: async () => {
+					stopCalls++;
+				},
+				markStopped() {},
+				sendMessage: async () => true,
+			};
+			registry.register(agent);
+			return {
+				agent,
+				get stopCalls() {
+					return stopCalls;
+				},
+			};
+		},
+		run(
+			options: {
+				agentId?: string;
+				sessionId?: string;
+				signal?: AbortSignal;
+				timeoutSeconds?: number;
+				onUpdate?: () => void;
+			} = {},
+		) {
+			const tool = tools.get("agent_wait");
+			assert.ok(tool);
+			return tool.execute(
+				"wait-1",
+				{ agent_id: options.agentId ?? "bria", timeout_seconds: options.timeoutSeconds ?? 30 },
+				options.signal,
+				options.onUpdate,
+				context(options.sessionId ?? "parent-a"),
+			);
+		},
+		emit,
+		input(data: Record<string, unknown> = {}, sessionId = "parent-a") {
+			emit("input_queued", { mode: "steer", source: "rpc", messageId: "input-1", ...data }, sessionId);
+		},
+		complete(agent: RegisteredAgent, output = "Child result") {
+			agent.status = "completed";
+			return registry.complete(agent, {
+				status: "completed",
+				output,
+				stats: { tokens: 0, toolUses: 0, durationMs: 1 },
+			});
+		},
+	};
+}
+
+async function assertPending(promise: Promise<unknown>) {
+	let settled = false;
+	void promise.then(() => {
+		settled = true;
+	});
+	await setImmediate();
+	assert.equal(settled, false, "wait must remain active");
+}
+
+describe("agent_wait user input", () => {
+	for (const source of ["rpc", "interactive"]) {
+		it(`releases an active wait on accepted ${source} steering without stopping the parent or child`, async (t) => {
+			const h = harness(t);
+			const child = h.child();
+			const parent = new AbortController();
+			const pending = h.run({ signal: parent.signal });
+			assert.equal(getEventListeners(parent.signal, "abort").length, 1);
+			h.input({ source, message: "USER_MESSAGE_DELIVERED_BY_PI" });
+			h.input({ source }); // A repeated notification cannot complete the same wait twice.
+			const result = await pending;
+			assert.equal(result.isError, undefined);
+			assert.deepEqual(result.details, { agentId: "bria", state: "running", interruptedByUser: true });
+			assert.match(result.content[0]?.text ?? "", /new user input arrived/);
+			assert.match(result.content[0]?.text ?? "", /child agents continue in the background/);
+			assert.doesNotMatch(result.content[0]?.text ?? "", /USER_MESSAGE_DELIVERED_BY_PI/);
+			assert.equal(parent.signal.aborted, false);
+			assert.equal(child.stopCalls, 0);
+			assert.equal(child.agent.status, "running");
+			assert.equal(h.registry.lookup("bria"), child.agent);
+			assert.equal(h.transcriptReads, 0);
+			assert.equal(getEventListeners(parent.signal, "abort").length, 0);
+
+			h.input(); // An event without an active wait must not linger.
+			const next = h.run({ signal: parent.signal });
+			await assertPending(next);
+			await h.complete(child.agent);
+			assert.equal((await next).content[0]?.text, "Child result");
+			assert.equal(getEventListeners(parent.signal, "abort").length, 0);
+		});
+	}
+
+	it("ignores follow-ups, generated input, other sessions, and events before input acceptance", async (t) => {
+		const h = harness(t);
+		const child = h.child();
+		const pending = h.run();
+		h.input({ mode: "followUp" });
+		h.input({ source: "extension" });
+		h.input({}, "parent-b");
+		h.emit("input", { source: "rpc", text: "not yet accepted" });
+		h.emit("input_rejected", { source: "rpc", mode: "steer" });
+		h.emit("pending_message_deleted", { messageId: "cancelled" });
+		await assertPending(pending);
+		await h.complete(child.agent);
+		const result = await pending;
+		assert.equal(result.content[0]?.text, "Child result");
+		assert.equal(result.details.interruptedByUser, undefined);
+	});
+
+	it("registers before the first progress callback, closing the wait-registration race", async (t) => {
+		const h = harness(t);
+		const child = h.child();
+		const result = await h.run({ onUpdate: () => h.input() });
+		assert.equal(result.isError, undefined);
+		assert.equal(result.details.interruptedByUser, true);
+		assert.equal(child.stopCalls, 0);
+		const next = h.run();
+		await assertPending(next);
+		await h.complete(child.agent);
+		assert.equal((await next).content[0]?.text, "Child result");
+	});
+
+	it("preserves explicit parent cancellation, including an already aborted or concurrent signal", async (t) => {
+		for (const phase of ["before", "during", "after-input"]) {
+			const h = harness(t);
+			const child = h.child();
+			const parent = new AbortController();
+			if (phase === "before") parent.abort();
+			const pending = h.run({ signal: parent.signal });
+			if (phase === "after-input") h.input();
+			if (phase !== "before") parent.abort();
+			const result = await pending;
+			assert.equal(result.isError, true);
+			assert.equal(result.content[0]?.text, "agent_wait cancelled");
+			assert.equal(result.details.interruptedByUser, undefined);
+			assert.equal(child.stopCalls, 0);
+			assert.equal(getEventListeners(parent.signal, "abort").length, 0);
+		}
+	});
+
+	it("keeps a completion that won the race and does not interrupt a later wait", async (t) => {
+		const h = harness(t);
+		const child = h.child();
+		const pending = h.run();
+		const completed = h.complete(child.agent);
+		h.input();
+		const result = await pending;
+		await completed;
+		assert.equal(result.content[0]?.text, "Child result");
+		assert.equal(result.details.interruptedByUser, undefined);
+		const nextChild = h.child("cora");
+		const next = h.run({ agentId: "cora" });
+		await assertPending(next);
+		await h.complete(nextChild.agent, "Next child result");
+		assert.equal((await next).content[0]?.text, "Next child result");
+	});
+
+	it("preserves a child completion that arrives after user input wins the race", async (t) => {
+		const h = harness(t);
+		const child = h.child();
+		const pending = h.run();
+		h.input();
+		await h.complete(child.agent, "Result after interruption");
+		const result = await pending;
+		assert.equal(result.isError, undefined);
+		assert.equal(result.details.interruptedByUser, true);
+		assert.equal(result.details.state, "idle");
+		assert.equal(child.stopCalls, 0);
+		const cached = await h.run();
+		assert.equal(cached.content[0]?.text, "Result after interruption");
+		assert.equal(cached.details.interruptedByUser, undefined);
+	});
+
+	it("wakes every active wait in the same session while leaving another session alone", async (t) => {
+		const h = harness(t);
+		const a = h.child("bria");
+		const b = h.child("cora");
+		const c = h.child("dara");
+		const first = h.run({ agentId: "bria" });
+		const second = h.run({ agentId: "cora" });
+		const other = h.run({ agentId: "dara", sessionId: "parent-b" });
+		h.input();
+		for (const result of await Promise.all([first, second])) {
+			assert.equal(result.isError, undefined);
+			assert.equal(result.details.interruptedByUser, true);
+		}
+		await assertPending(other);
+		assert.equal(a.stopCalls + b.stopCalls + c.stopCalls, 0);
+		await h.complete(c.agent);
+		assert.equal((await other).content[0]?.text, "Child result");
+	});
+
+	it("cleans up after timeout, unknown child, and progress callback failure", async (t) => {
+		const h = harness(t);
+		h.child();
+		const parent = new AbortController();
+		const snapshot = await h.run({ signal: parent.signal, timeoutSeconds: 0 });
+		assert.equal(snapshot.details.timedOut, false);
+		assert.equal(getEventListeners(parent.signal, "abort").length, 0);
+		const unknown = await h.run({ signal: parent.signal, agentId: "missing" });
+		assert.equal(unknown.isError, true);
+		assert.equal(getEventListeners(parent.signal, "abort").length, 0);
+		const failedUpdate = await h.run({
+			signal: parent.signal,
+			onUpdate: () => {
+				throw new Error("progress callback failed");
+			},
+		});
+		assert.equal(failedUpdate.content[0]?.text, "progress callback failed");
+		assert.equal(getEventListeners(parent.signal, "abort").length, 0);
+		h.input();
+		const next = h.run({ signal: parent.signal });
+		await assertPending(next);
+		parent.abort();
+		assert.equal((await next).isError, true);
+		assert.equal(getEventListeners(parent.signal, "abort").length, 0);
+	});
+
+	it("continues normal waits when the host never emits the optional input hook", async (t) => {
+		const h = harness(t);
+		const child = h.child();
+		const pending = h.run();
+		await assertPending(pending);
+		await h.complete(child.agent);
+		assert.equal((await pending).content[0]?.text, "Child result");
+	});
+});

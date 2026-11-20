@@ -11,6 +11,7 @@ import type { AgentRegistry, AgentSettlement, AgentWaitEvent, RegisteredAgent } 
 import { InspectParamsSchema, WaitParamsSchema } from "./tool-params.js";
 import type { IncrementalMonitoringTranscript } from "./transcript.js";
 import { atId } from "./views.js";
+import { registerWaitInput } from "./wait-input.js";
 import { resolveWaitTimeoutSeconds } from "./wait-policy.js";
 
 type ErrorToolResult = {
@@ -34,13 +35,14 @@ export type MonitoringPorts = {
 
 export function registerMonitoringTools(pi: ExtensionAPI, ports: MonitoringPorts): void {
 	const { registry, captureUi, unreadTranscript, activitySummary, toErrorResult, hasParent } = ports;
+	const waitInput = registerWaitInput(pi);
 
 	// ── agent_wait ───────────────────────────────────────
 	pi.registerTool({
 		name: "agent_wait",
 		label: "Wait for Agent",
 		description:
-			"Wait for a direct child to settle, fail/stop, ask its parent a question, or receive any child message to @parent. Child messages wake the wait immediately. timeout_seconds limits this call; expiry shows newest progress. Neither stops the child. Default 180 seconds.",
+			"Wait for a direct child to settle, fail/stop, ask its parent a question, or receive any child message to @parent. Child messages wake the wait immediately. Accepted user steering also releases the wait when supported by the host. timeout_seconds limits this call; expiry shows newest progress. None stops the child. Default 180 seconds.",
 		promptSnippet: "Wait for a background or resumed child to settle",
 		promptGuidelines: [
 			"Use agent_wait when a background child's result becomes the next dependency instead of shell sleep or polling. This applies to subagents, not ordinary external processes with process/job wait mechanisms. Use completion results already delivered rather than fetching them again.",
@@ -48,6 +50,7 @@ export function registerMonitoringTools(pi: ExtensionAPI, ports: MonitoringPorts
 			"If timeout_seconds is omitted, agent_wait uses a 180-second supervision window. timeout_seconds: 0 returns an immediate live snapshot.",
 			"If agent_wait returns an ask_parent question, answer that same child with agent_send kind=answer. Wait again only when its resumed result is needed.",
 			"If agent_wait returns an ordinary message from any child, handle it immediately. The child remains running. Reply with agent_send if needed, then resume supervision.",
+			"If agent_wait ends because new user input arrived, handle that input before waiting again. Child agents continue in the background.",
 		],
 		parameters: WaitParamsSchema,
 
@@ -67,15 +70,33 @@ export function registerMonitoringTools(pi: ExtensionAPI, ports: MonitoringPorts
 			const timeoutSeconds = resolveWaitTimeoutSeconds(requestedTimeoutSeconds);
 			const timeoutMs = timeoutSeconds * 1000;
 			const waitLabel = `up to ${timeoutSeconds}s`;
-			onUpdate?.({
-				content: [{ type: "text", text: `Waiting for ${atId(agentId)} (${waitLabel})…` }],
-				details: { agentId, timeoutSeconds },
-			});
+			const wait = waitInput.begin(ctx.sessionManager.getSessionId(), signal);
 			let settlement: AgentSettlement | AgentWaitEvent | null | undefined;
 			try {
-				settlement = await registry.waitForSettlement(agentId, signal, timeoutMs, true);
+				onUpdate?.({
+					content: [{ type: "text", text: `Waiting for ${atId(agentId)} (${waitLabel})…` }],
+					details: { agentId, timeoutSeconds },
+				});
+				settlement = await registry.waitForSettlement(agentId, wait.signal, timeoutMs, true);
 			} catch (error) {
+				if (wait.interruptedByUser && !signal?.aborted) {
+					const live = registry.lookup(agentId);
+					const state = live
+						? reportedAgentState(live)
+						: (registry.peekSettlement(agentId)?.completion.status ?? "unknown");
+					return {
+						content: [
+							{
+								type: "text",
+								text: `Waiting for ${atId(agentId)} ended because new user input arrived. Current state: ${state}. Running child agents continue in the background. Handle the new input before waiting again.`,
+							},
+						],
+						details: { agentId, state, interruptedByUser: true },
+					};
+				}
 				return toErrorResult(error);
+			} finally {
+				wait.dispose();
 			}
 			if (settlement === null) {
 				const live = registry.lookup(agentId);

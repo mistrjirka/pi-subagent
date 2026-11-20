@@ -331,6 +331,8 @@ for large histories. Do not use one recovery id concurrently in two Pi sessions.
 
 ### `agent_wait`
 
+On Pi versions with the accepted `input_queued` hook, a user steering message in PiTTy or the terminal immediately releases active waits in that session. The result reports `interruptedByUser: true` and the current child state. Child agents continue running, and Pi delivers the queued input at its next boundary. Follow-up messages and extension-generated input keep their existing delivery behavior. Older Pi versions without this hook retain the normal wait behavior. Saved conversations need no migration.
+
 Wait for a direct child that is running in the background or has been resumed with `agent_send`:
 
 ```json

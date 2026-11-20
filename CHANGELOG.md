@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.26 — release parent waits for user input
+
+- Release active `agent_wait` calls when accepted user steering input arrives in the same session. The tool returns the current child state and `interruptedByUser: true`, while child agents keep running and Pi delivers the queued message.
+- Preserve explicit parent cancellation, child completion delivery, follow-up messages, generated input, and later waits. Register before progress callbacks and remove abort listeners on every completion path.
+- Keep compatibility with Pi versions without the optional `input_queued` hook and with existing saved conversations.
+
+Validation: 444 tests and TypeScript pass. Biome exits successfully. An offline managed-Pi RPC test confirms accepted-message delivery while the same child process keeps running, rejected/handled/duplicate input filtering, and a later normal wait. Published Pi 0.87.1 loads the updated extension.
+
 ## 0.5.25 — split the spawn entrypoint into typed modules
 
 - Extract the `agent_spawn` tool registration, live card wiring, control bridge and completion branches to `spawn-tool.ts`, leaving `index.ts` responsible for root registry and shared extension lifecycle.

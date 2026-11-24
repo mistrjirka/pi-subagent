@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.28 — do not block queued input
+
+- Release new `agent_wait` calls immediately if user input is already pending. Existing children keep running.
+- Regression: pending input before wait, no abort leakage, and later ordinary waits.
+
 ## 0.5.27 — release wait for follow-up messages
 
 - Release `agent_wait` for any accepted user input from RPC or interactive mode, including queued follow-ups, without stopping child agents.

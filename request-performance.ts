@@ -1,0 +1,190 @@
+/**
+ * Child RPC request measurements. Keep the measurement boundaries and
+ * buffered-output rejection in sync with PiTTy's request-metrics.ts (v3).
+ * Do not infer token counts from text or include tool execution in generation.
+ */
+export type RequestPerformance = {
+	provider?: string;
+	modelId?: string;
+	ttftMs: number;
+	generationMs: number;
+	outputTokens: number;
+};
+
+export type RequestModelSnapshot = {
+	provider?: string | undefined;
+	id?: string | undefined;
+};
+
+/** Keep wrapper-provider samples under the selected model's picker entry. */
+export function requestModelIdentity(
+	message: { provider?: unknown; model?: unknown; responseModel?: unknown } | undefined,
+	selected?: RequestModelSnapshot,
+): Pick<RequestPerformance, "provider" | "modelId"> {
+	const nonEmpty = (value: unknown) =>
+		typeof value === "string" && value.trim() ? value.trim() : undefined;
+	const modelId = nonEmpty(message?.model) ?? nonEmpty(message?.responseModel) ?? nonEmpty(selected?.id);
+	// Wrappers can stream the underlying provider's identity unchanged. Only
+	// trust the selected provider when the model IDs agree; a different model
+	// in the event still wins over a stale session snapshot.
+	const provider =
+		(modelId && modelId === nonEmpty(selected?.id) ? nonEmpty(selected?.provider) : undefined) ??
+		nonEmpty(message?.provider) ?? nonEmpty(selected?.provider);
+	return {
+		...(provider ? { provider } : {}),
+		...(modelId ? { modelId } : {}),
+	};
+}
+
+type ActiveRequest = {
+	startedAt: number;
+	firstOutputAt?: number;
+	/** Arrival of the most recent output delta; ends the measured streaming window. */
+	lastOutputAt?: number;
+	/** Number of output deltas that arrived at distinct milliseconds. */
+	outputArrivals: number;
+	provider?: string;
+	modelId?: string;
+};
+
+// Throughput is only meaningful for a response that really streamed. Providers that
+// buffer a reply and flush it at once (or a UI stall that delivers many events in one
+// tick) collapse the window to ~0 ms and yield absurd tok/s, so those are not sampled.
+const MIN_GENERATION_MS = 1_000;
+const MIN_OUTPUT_ARRIVALS = 8;
+
+const OUTPUT_DELTA_TYPES: ReadonlySet<string> = new Set([
+	"text_delta",
+	"thinking_delta",
+	"reasoning_delta",
+	"toolcall_delta",
+]);
+
+import type { RpcEvent } from "./protocol.js";
+
+export type PerformanceEvent = {
+	type: string;
+	message?: {
+		role?: string;
+		timestamp?: number;
+		provider?: string;
+		model?: string;
+		responseModel?: string;
+		stopReason?: string;
+		usage?: { output?: number };
+	};
+	assistantMessageEvent?: { type?: string };
+};
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null;
+}
+
+export class RequestPerformanceTracker {
+	private turnStartedAt: number | undefined;
+	private active: ActiveRequest | undefined;
+	private completed: RequestPerformance | undefined;
+
+	handle(
+		event: PerformanceEvent | RpcEvent,
+		receivedAt: number,
+		model?: RequestModelSnapshot,
+	): RequestPerformance | undefined {
+		if (event.type === "agent_start" || event.type === "agent_settled") {
+			this.turnStartedAt = undefined;
+			if (event.type === "agent_settled") this.active = undefined;
+			return undefined;
+		}
+		if (event.type === "turn_start") {
+			this.turnStartedAt = receivedAt;
+			return undefined;
+		}
+		const message =
+			"message" in event && isRecord(event.message) ? event.message : undefined;
+		const assistantEvent =
+			"assistantMessageEvent" in event && isRecord(event.assistantMessageEvent)
+				? event.assistantMessageEvent
+				: undefined;
+		if (event.type === "message_start") {
+			if (message?.role !== "assistant") return undefined;
+			if (this.active) {
+				// Pi normally serializes model calls. If two starts overlap, discard
+				// both rather than attributing the second completion to the first call.
+				this.active = undefined;
+				return undefined;
+			}
+			// A partial session without a matching turn_start cannot give a
+			// trustworthy turn-to-first-output sample. Do not use the provider's
+			// message timestamp to fabricate a different metric.
+			if (this.turnStartedAt === undefined || receivedAt < this.turnStartedAt)
+				return undefined;
+			const { provider, modelId } = requestModelIdentity(message, model);
+			this.active = {
+				startedAt: this.turnStartedAt,
+				outputArrivals: 0,
+				...(provider && modelId ? { provider, modelId } : {}),
+			};
+			return undefined;
+		}
+		if (event.type === "message_update" && this.active) {
+			const deltaType = assistantEvent?.type;
+			if (typeof deltaType === "string" && OUTPUT_DELTA_TYPES.has(deltaType) &&
+				typeof assistantEvent?.delta === "string" && assistantEvent.delta.length > 0) {
+				const active = this.active;
+				if (active.firstOutputAt === undefined) {
+					active.firstOutputAt = receivedAt;
+					active.lastOutputAt = receivedAt;
+					active.outputArrivals = 1;
+				} else if (active.lastOutputAt === undefined || receivedAt > active.lastOutputAt) {
+					active.lastOutputAt = receivedAt;
+					active.outputArrivals += 1;
+				}
+			}
+			return undefined;
+		}
+		if (
+			event.type !== "message_end" ||
+			!this.active ||
+			message?.role !== "assistant"
+		)
+			return undefined;
+		const usage = isRecord(message.usage) ? message.usage : undefined;
+		const outputTokens = usage?.output;
+		const firstOutputAt = this.active.firstOutputAt;
+		// End the window at the last streamed delta rather than at message_end, which
+		// also waits for the final usage frame and for the UI to get to the event.
+		const lastOutputAt = this.active.lastOutputAt;
+		const stopReason = message.stopReason;
+		const completedNormally =
+			stopReason === "stop" ||
+			stopReason === "toolUse" ||
+			stopReason === "length";
+		let performance: RequestPerformance | undefined;
+		if (
+			completedNormally &&
+			firstOutputAt !== undefined &&
+			lastOutputAt !== undefined &&
+			firstOutputAt >= this.active.startedAt &&
+			lastOutputAt - firstOutputAt >= MIN_GENERATION_MS &&
+			this.active.outputArrivals >= MIN_OUTPUT_ARRIVALS &&
+			typeof outputTokens === "number" &&
+			outputTokens > 0
+		) {
+			performance = {
+				...(this.active.provider && this.active.modelId
+					? { provider: this.active.provider, modelId: this.active.modelId }
+					: {}),
+				ttftMs: firstOutputAt - this.active.startedAt,
+				generationMs: lastOutputAt - firstOutputAt,
+				outputTokens,
+			};
+			this.completed = performance;
+		}
+		this.active = undefined;
+		return performance;
+	}
+
+	get value(): RequestPerformance | undefined {
+		return this.completed;
+	}
+}

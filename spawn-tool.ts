@@ -1,3 +1,4 @@
+import { recordSubagentPerformance } from "./model-performance-journal.js";
 /** Registers agent_spawn. The root owns registries and cleanup; this owns one launch. */
 import * as path from "node:path";
 import type { ExtensionAPI, ExtensionUIContext } from "@earendil-works/pi-coding-agent";
@@ -147,6 +148,7 @@ export function registerSpawnTool(pi: ExtensionAPI, ports: SpawnToolPorts): void
 					startedAt,
 					model: agent.model,
 					thinking: agent.thinking,
+					lastRequestPerformance: agent.getLatestRequestPerformance(),
 					activity,
 					events: agent.getEvents(),
 					nested: subtree.nested(),
@@ -201,6 +203,7 @@ export function registerSpawnTool(pi: ExtensionAPI, ports: SpawnToolPorts): void
 				});
 
 				const agent = new AgentProcess({
+					onPerformance: recordSubagentPerformance,
 					agentId,
 					cwd: ctx.cwd,
 					model: resolved.model,

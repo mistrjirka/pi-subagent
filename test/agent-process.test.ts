@@ -12,6 +12,8 @@ import { describe, it } from "node:test";
 import { AgentProcess, type AgentProcessOptions } from "../agent-process.js";
 import type { AgentActivity, AgentEvent } from "../event-interpret.js";
 import type { RpcClientOptions } from "../rpc-client.js";
+import type { RequestPerformance } from "../request-performance.js";
+import type { RpcEvent } from "../protocol.js";
 import type { RenderEvent } from "../types.js";
 
 /** Programmable fake standing in for RpcClient. */
@@ -133,30 +135,8 @@ class FakeClient {
 		this.onEvent?.({ type: "agent_settled" });
 	}
 
-	emitEvent(event: {
-		[key: string]: unknown;
-		type: string;
-		assistantMessageEvent?: {
-			type: string;
-			delta?: unknown;
-			contentIndex?: unknown;
-			id?: unknown;
-			toolName?: unknown;
-			toolCall?: { id?: unknown; name?: unknown; arguments?: unknown };
-		};
-		messages?: Array<{ role?: string; stopReason?: string; errorMessage?: unknown; content?: unknown[] }>;
-		message?: {
-			content?: Array<{
-				type?: string;
-				text?: unknown;
-				thinking?: unknown;
-				name?: unknown;
-				arguments?: unknown;
-				id?: unknown;
-			}>;
-		};
-	}): void {
-		this.onEvent?.(event as never);
+	emitEvent(event: RpcEvent): void {
+		this.onEvent?.(event);
 	}
 
 	emitExit(code: number): void {
@@ -201,6 +181,34 @@ function makeAgent(options: Partial<AgentProcessOptions> & { cwd: string }): { a
 	);
 	return { agent, fake };
 }
+
+describe("AgentProcess — model performance", () => {
+	it("measures separate child requests and records each completed stream once", (t) => {
+		let now = 1_000;
+		t.mock.method(Date, "now", () => now);
+		const samples: RequestPerformance[] = [];
+		const { agent, fake } = makeAgent({ cwd: "/tmp", model: "doppelclaude/claude-opus", onPerformance: (sample) => samples.push(sample) });
+		fake.emitEvent({ type: "turn_start" });
+		now = 1_001;
+		fake.emitEvent({ type: "message_start", message: { role: "assistant", provider: "anthropic", model: "claude-opus" } });
+		for (let i = 0; i < 9; i++) {
+			now = 1_800 + i * 150;
+			fake.emitEvent({ type: "message_update", assistantMessageEvent: { type: "thinking_delta", delta: "x" } });
+		}
+		now = 9_000; // usage delivery / tool time is not part of generation
+		const end = { type: "message_end", message: { role: "assistant", stopReason: "toolUse", usage: { output: 48 }, content: [] } };
+		fake.emitEvent(end);
+		fake.emitEvent(end);
+		assert.deepEqual(samples, [{ provider: "doppelclaude", modelId: "claude-opus", ttftMs: 800, generationMs: 1200, outputTokens: 48 }]);
+		assert.deepEqual(agent.getLatestRequestPerformance(), samples[0]);
+		now = 10_000;
+		fake.emitEvent({ type: "turn_start" });
+		fake.emitEvent({ type: "message_start", message: { role: "assistant", provider: "anthropic", model: "claude-opus" } });
+		fake.emitEvent({ type: "message_end", message: { role: "assistant", stopReason: "error", usage: { output: 0 }, content: [] } });
+		assert.equal(samples.length, 1);
+		assert.deepEqual(agent.getLatestRequestPerformance(), samples[0]);
+	});
+});
 
 describe("AgentProcess — spawnAndSend", () => {
 	it("stores only a short, single-line task preview for compaction", () => {

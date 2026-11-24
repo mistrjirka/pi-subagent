@@ -30,6 +30,7 @@ import type { AgentTreeEvent } from "./event-interpret.js";
 import { type AgentActivity, interpretEvent } from "./event-interpret.js";
 import type { AgentMessage, AgentQuestion, RpcCommand, RpcEvent } from "./protocol.js";
 import { RpcClient, type RpcClientOptions } from "./rpc-client.js";
+import { RequestPerformanceTracker, type RequestPerformance, type RequestModelSnapshot } from "./request-performance.js";
 import type { RenderEvent } from "./types.js";
 
 export type { AgentCompletion, AgentProcessOptions, AgentSessionEntryPage } from "./agent-process-contracts.js";
@@ -81,6 +82,9 @@ export class AgentProcess {
 	/** Model API error captured from agent_end (stopReason "error"). */
 	private agentError: string | null = null;
 	private readonly activity: AgentActivityFold;
+	private readonly performance = new RequestPerformanceTracker();
+	private readonly selectedModel: RequestModelSnapshot | undefined;
+	private readonly onPerformance: ((performance: RequestPerformance) => void) | undefined;
 	/** Latest activity excerpt for the widget. */
 
 	/** Ordered activity stream — accumulated from RPC events at the source. */
@@ -93,6 +97,11 @@ export class AgentProcess {
 		this.label = options.label;
 		this.taskSummary = options.taskSummary?.replace(/\s+/g, " ").trim().slice(0, 140);
 		this.model = options.model;
+		const separator = options.model?.indexOf("/") ?? -1;
+		this.selectedModel = options.model && separator > 0
+			? { provider: options.model.slice(0, separator), id: options.model.slice(separator + 1) }
+			: undefined;
+		this.onPerformance = options.onPerformance;
 		this.thinking = options.thinking;
 		this.persistent = options.persistent ?? false;
 		this.onMessage = options.onMessage;
@@ -405,6 +414,10 @@ export class AgentProcess {
 	}
 
 	/** Latest activity excerpt for the widget (undefined until the first message_update). */
+	getLatestRequestPerformance(): RequestPerformance | undefined {
+		return this.performance.value;
+	}
+
 	getLatestActivity(): AgentActivity | undefined {
 		return this.activity.latestActivity();
 	}
@@ -430,6 +443,12 @@ export class AgentProcess {
 	private readonly resumeSessionPath: string | undefined;
 
 	private onEvent(event: RpcEvent): void {
+		// Observe the uncoalesced RPC stream before translating it into UI events.
+		const sample = this.performance.handle(event, Date.now(), this.selectedModel);
+		if (sample) {
+			try { this.onPerformance?.(sample); } catch { /* Metrics never interrupt an agent. */ }
+		}
+
 		// Raw protocol shapes are interpreted in event-interpret.ts — the only
 		// place pi's event vocabulary is mapped onto ours. Since v0.84.0 the
 		// wire carries only assistantMessageEvent deltas, so each event maps to

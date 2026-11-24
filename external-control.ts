@@ -6,6 +6,7 @@ import { reportedAgentState } from "./agent-state.js";
 import { AgentTelemetryService } from "./agent-telemetry.js";
 import { ChildEventWriter, type ExternalControlOptions } from "./child-event-writer.js";
 import type { AgentEvent } from "./event-interpret.js";
+import type { RequestPerformance } from "./request-performance.js";
 
 export type { ChildStreamLine, ExternalControlOptions } from "./child-event-writer.js";
 
@@ -22,6 +23,7 @@ export interface ExternallyControllableAgent {
 	readonly awaitingParent?: boolean;
 	readonly pendingQuestion?: { question: string; context?: string } | undefined;
 	readonly sessionPath?: string;
+	getLatestRequestPerformance?(): RequestPerformance | undefined;
 	sendMessage(text: string): Promise<boolean>;
 	stop(): Promise<void>;
 }
@@ -63,6 +65,8 @@ export interface ExternalControlStatus {
 	toolCount?: number;
 	windowTokens?: number;
 	lastActivityAt?: number;
+	/** Last valid model response, not whole-agent elapsed time. */
+	lastRequestPerformance?: RequestPerformance;
 }
 
 type SteerRequest = {
@@ -208,6 +212,7 @@ export class ExternalControlBridge {
 	}
 
 	private snapshot(): ExternalControlStatus {
+		const performance = this.agent.getLatestRequestPerformance?.();
 		return {
 			version: 1,
 			runtime: "profiled-subagents",
@@ -219,6 +224,7 @@ export class ExternalControlBridge {
 			state: stateOf(this.agent),
 			startedAt: this.agent.startedAt,
 			updatedAt: Date.now(),
+			...(performance ? { lastRequestPerformance: performance } : {}),
 			...(() => {
 				const { activeTools: _activeTools, ...usage } = this.telemetry.snapshot();
 				return usage;

@@ -1,3 +1,4 @@
+import type { RequestPerformance } from "./request-performance.js";
 /** Typed process options and completion contracts, independent of transport. */
 import type { AgentActivity, AgentEvent, AgentTreeEvent } from "./event-interpret.js";
 import type { AgentMessage, AgentQuestion } from "./protocol.js";
@@ -31,6 +32,8 @@ export interface AgentSessionEntryPage {
 }
 
 export interface AgentProcessOptions {
+	/** Completed, genuinely streamed model request. */
+	onPerformance?: (performance: RequestPerformance) => void;
 	cwd: string;
 	/** Resolved "provider/id" model string, or inherit when omitted. */
 	model?: string;

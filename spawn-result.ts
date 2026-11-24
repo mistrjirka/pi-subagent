@@ -1,3 +1,4 @@
+import type { RequestPerformance } from "./request-performance.js";
 /**
  * Tool-result presentation for a spawned child.
  *
@@ -18,6 +19,7 @@ export type SpawnPresentationContext = {
 		awaitingParent?: boolean;
 		model?: string;
 		thinking?: string;
+		getLatestRequestPerformance?(): RequestPerformance | undefined;
 	};
 	profile: string;
 	task: string;
@@ -49,7 +51,9 @@ export type SpawnPresentation = {
 type Finished = Extract<SpawnOutcome, { kind: "finished" }>;
 
 function baseDetails(ctx: SpawnPresentationContext): SubagentDetails {
+	const performance = ctx.agent.getLatestRequestPerformance?.();
 	return {
+		...(performance ? { lastRequestPerformance: performance } : {}),
 		runtime: "profiled-subagents",
 		profile: ctx.profile,
 		treeId: ctx.treeId,

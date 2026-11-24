@@ -1,3 +1,4 @@
+import type { RequestPerformance } from "./request-performance.js";
 /**
  * pi-subagent — shared protocol types.
  *
@@ -28,6 +29,7 @@ export type RenderEvent =
  * views (views.ts) and the notification card (render.ts).
  */
 export type SubagentDetails = {
+	lastRequestPerformance?: RequestPerformance;
 	task?: string;
 	/** Identifies this fork's direct-control integration to external UIs. */
 	runtime?: "profiled-subagents";

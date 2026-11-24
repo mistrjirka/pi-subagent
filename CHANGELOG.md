@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.5.29 — measure child model performance
+
+- Measure each child's first-output latency and token throughput from raw RPC events and provider-reported token usage.
+- Publish the latest valid request measurement through the existing status bridge.
+- Persist each valid completed request in a bounded daily journal without storing prompts or responses.
+- Reject failed, buffered, and too-short samples using the same boundaries as PiTTy.
+
+Validation: 449 tests and TypeScript pass.
+
 ## 0.5.28 — do not block queued input
 
 - Release new `agent_wait` calls immediately if user input is already pending. Existing children keep running.

@@ -70,7 +70,7 @@ export function registerMonitoringTools(pi: ExtensionAPI, ports: MonitoringPorts
 			const timeoutSeconds = resolveWaitTimeoutSeconds(requestedTimeoutSeconds);
 			const timeoutMs = timeoutSeconds * 1000;
 			const waitLabel = `up to ${timeoutSeconds}s`;
-			const wait = waitInput.begin(ctx.sessionManager.getSessionId(), signal);
+			const wait = waitInput.begin(ctx, signal);
 			let settlement: AgentSettlement | AgentWaitEvent | null | undefined;
 			try {
 				onUpdate?.({

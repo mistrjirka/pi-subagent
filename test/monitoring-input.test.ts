@@ -15,6 +15,7 @@ type ToolContext = {
 	mode: string;
 	ui: ExtensionUIContext;
 	sessionManager: { getSessionId: () => string };
+	hasPendingMessages: () => boolean;
 };
 type RegisteredTool = {
 	name: string;
@@ -28,8 +29,8 @@ type RegisteredTool = {
 };
 type EventHandler = (event: Record<string, unknown>, ctx: ToolContext) => void;
 
-function context(sessionId: string): ToolContext {
-	return { mode: "rpc", ui: {} as ExtensionUIContext, sessionManager: { getSessionId: () => sessionId } };
+function context(sessionId: string, hasPending = false): ToolContext {
+	return { mode: "rpc", ui: {} as ExtensionUIContext, sessionManager: { getSessionId: () => sessionId }, hasPendingMessages: () => hasPending };
 }
 
 function harness(t: TestContext) {
@@ -101,6 +102,7 @@ function harness(t: TestContext) {
 				sessionId?: string;
 				signal?: AbortSignal;
 				timeoutSeconds?: number;
+				hasPending?: boolean;
 				onUpdate?: () => void;
 			} = {},
 		) {
@@ -111,7 +113,7 @@ function harness(t: TestContext) {
 				{ agent_id: options.agentId ?? "bria", timeout_seconds: options.timeoutSeconds ?? 30 },
 				options.signal,
 				options.onUpdate,
-				context(options.sessionId ?? "parent-a"),
+				context(options.sessionId ?? "parent-a", options.hasPending),
 			);
 		},
 		emit,
@@ -139,6 +141,21 @@ async function assertPending(promise: Promise<unknown>) {
 }
 
 describe("agent_wait user input", () => {
+	it("releases a new wait immediately when user input is already queued", async (t) => {
+		const h = harness(t);
+		const child = h.child();
+		const parent = new AbortController();
+		const result = await h.run({ hasPending: true, signal: parent.signal, timeoutSeconds: 1 });
+		assert.equal(result.details.interruptedByUser, true);
+		assert.equal(parent.signal.aborted, false);
+		assert.equal(child.stopCalls, 0);
+		assert.equal(getEventListeners(parent.signal, "abort").length, 0);
+		const next = h.run({ signal: parent.signal });
+		await assertPending(next);
+		await h.complete(child.agent);
+		assert.equal((await next).content[0]?.text, "Child result");
+	});
+
 	for (const source of ["rpc", "interactive"]) {
 		it(`releases an active wait on accepted ${source} steering without stopping the parent or child`, async (t) => {
 			const h = harness(t);

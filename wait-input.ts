@@ -25,7 +25,7 @@ export type InputInterruptibleWait = {
 
 /** Releases active parent waits without aborting the parent turn or its children. */
 export function registerWaitInput(pi: ExtensionAPI): {
-	begin: (sessionId: string, parentSignal?: AbortSignal) => InputInterruptibleWait;
+	begin: (ctx: ExtensionContext, parentSignal?: AbortSignal) => InputInterruptibleWait;
 } {
 	const active = new Set<ActiveWait>();
 	const onInputQueued = pi.on.bind(pi) as unknown as InputQueuedAPI["on"];
@@ -42,7 +42,8 @@ export function registerWaitInput(pi: ExtensionAPI): {
 	});
 
 	return {
-		begin(sessionId, parentSignal) {
+		begin(ctx, parentSignal) {
+			const sessionId = ctx.sessionManager.getSessionId();
 			const controller = new AbortController();
 			let interruptedByUser = false;
 			const dispose = () => {
@@ -67,6 +68,9 @@ export function registerWaitInput(pi: ExtensionAPI): {
 			} else {
 				active.add(wait);
 				parentSignal?.addEventListener("abort", onParentAbort, { once: true });
+				// Input may already be queued when this tool starts. Do not require
+				// a second input_queued event to release this wait.
+				if (ctx.hasPendingMessages()) wait.interrupt();
 			}
 			return {
 				signal: controller.signal,

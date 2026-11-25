@@ -409,3 +409,27 @@ describe("independent runtime override validation", () => {
 		]);
 	});
 });
+
+describe("legacy thinking inheritance", () => {
+	for (const thinking of [undefined, null, "", "   "]) {
+		it(`keeps ${JSON.stringify(thinking) ?? "omitted"} thinking inherited without dropping tool groups`, () => {
+			const { agentDir, cwd } = fixture();
+			write(path.join(agentDir, "agents", "worker.md"), "---\nname: worker\n---\nWork.\n");
+			const settings = path.join(agentDir, "settings.json");
+			write(
+				settings,
+				JSON.stringify({
+					subagentProfiles: { defaults: { thinking: "medium" }, agents: { worker: { toolGroups: [], thinking } } },
+				}),
+			);
+			const profile = discoverAgentProfiles(cwd).profiles.get("worker");
+			assert.ok(profile);
+			const resolved = resolveAgentProfile(profile, cwd);
+			assert.equal(resolved.resolvedThinking, "medium");
+			assert.deepEqual(resolved.resolvedToolGroups, []);
+			write(settings, JSON.stringify({ subagentProfiles: { agents: { worker: { toolGroups: [], thinking } } } }));
+			assert.equal(resolveAgentProfile(profile, cwd).resolvedThinking, undefined);
+			assert.deepEqual(resolveAgentProfile(profile, cwd).resolvedToolGroups, []);
+		});
+	}
+});

@@ -260,10 +260,9 @@ function runtimeOverride(value: unknown): AgentRuntimeOverride | undefined {
 	}
 	const model = stringField(raw.model);
 	const thinking = stringField(raw.thinking);
+	// Keep legacy omission values (including null and blank strings) inheriting.
 	const thinkingError =
-		raw.thinking !== undefined && (!thinking || !THINKING_LEVELS.has(thinking))
-			? `invalid thinking level ${JSON.stringify(raw.thinking)}`
-			: undefined;
+		thinking && !THINKING_LEVELS.has(thinking) ? `invalid thinking level ${JSON.stringify(raw.thinking)}` : undefined;
 	return {
 		...(toolGroups !== undefined ? { toolGroups } : {}),
 		...(toolGroupsError ? { toolGroupsError } : {}),

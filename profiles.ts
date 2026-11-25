@@ -19,6 +19,7 @@ export interface AgentProfile {
 }
 
 interface AgentRuntimeOverride {
+	thinkingError?: string;
 	toolGroups?: string[];
 	toolGroupsError?: string;
 	model?: string;
@@ -259,12 +260,15 @@ function runtimeOverride(value: unknown): AgentRuntimeOverride | undefined {
 	}
 	const model = stringField(raw.model);
 	const thinking = stringField(raw.thinking);
-	if (thinking && !THINKING_LEVELS.has(thinking)) return undefined;
+	const thinkingError =
+		raw.thinking !== undefined && (!thinking || !THINKING_LEVELS.has(thinking))
+			? `invalid thinking level ${JSON.stringify(raw.thinking)}`
+			: undefined;
 	return {
 		...(toolGroups !== undefined ? { toolGroups } : {}),
 		...(toolGroupsError ? { toolGroupsError } : {}),
 		...(model ? { model } : {}),
-		...(thinking ? { thinking } : {}),
+		...(thinkingError ? { thinkingError } : thinking ? { thinking } : {}),
 	};
 }
 
@@ -313,7 +317,8 @@ export function resolveAgentProfile(profile: AgentProfile, cwd: string): Resolve
 	const projectSettings = readSettingsFile(path.join(cwd, ".pi", "settings.json")).settings;
 	const globalAgent = globalSettings.agents?.[profile.name];
 	const projectAgent = projectSettings.agents?.[profile.name];
-	const toolOwner = [projectAgent, globalAgent, profile, projectSettings.defaults, globalSettings.defaults].find(
+	const overrides = [projectAgent, globalAgent, profile, projectSettings.defaults, globalSettings.defaults];
+	const toolOwner = overrides.find(
 		(owner) => owner && (owner.toolGroups !== undefined || ("toolGroupsError" in owner && owner.toolGroupsError)),
 	);
 	if (toolOwner && "toolGroupsError" in toolOwner && toolOwner.toolGroupsError) {
@@ -326,12 +331,13 @@ export function resolveAgentProfile(profile: AgentProfile, cwd: string): Resolve
 		profile.model ??
 		projectSettings.defaults?.model ??
 		globalSettings.defaults?.model;
-	const resolvedThinking =
-		projectAgent?.thinking ??
-		globalAgent?.thinking ??
-		profile.thinking ??
-		projectSettings.defaults?.thinking ??
-		globalSettings.defaults?.thinking;
+	const thinkingOwner = overrides.find(
+		(owner) => owner && (owner.thinking !== undefined || ("thinkingError" in owner && owner.thinkingError)),
+	);
+	if (thinkingOwner && "thinkingError" in thinkingOwner && thinkingOwner.thinkingError) {
+		throw new Error(`${profile.name}: ${thinkingOwner.thinkingError}`);
+	}
+	const resolvedThinking = thinkingOwner?.thinking;
 	return {
 		...profile,
 		...(resolvedModel ? { resolvedModel } : {}),

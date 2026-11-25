@@ -12,6 +12,8 @@ import {
 	resolveAgentProfile,
 } from "../profiles.js";
 
+import { selectChildTools } from "../tool-capabilities.js";
+
 const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
 const roots: string[] = [];
 
@@ -346,5 +348,64 @@ describe("optional tool group configuration", () => {
 		const profile = discoverAgentProfiles(cwd).profiles.get("worker");
 		assert.ok(profile);
 		assert.throws(() => resolveAgentProfile(profile, cwd), /toolGroups/);
+	});
+});
+
+describe("independent runtime override validation", () => {
+	it("rejects invalid thinking without discarding an empty tool selection", () => {
+		const { agentDir, cwd } = fixture();
+		write(path.join(agentDir, "agents", "worker.md"), "---\nname: worker\n---\nWork.\n");
+		write(
+			path.join(agentDir, "settings.json"),
+			JSON.stringify({ subagentProfiles: { agents: { worker: { toolGroups: [], thinking: "typo" } } } }),
+		);
+		const profile = discoverAgentProfiles(cwd).profiles.get("worker");
+		assert.ok(profile);
+		assert.throws(() => resolveAgentProfile(profile, cwd), /invalid thinking level "typo"/);
+		// A valid higher-priority thinking choice must retain the independent group selection.
+		write(
+			path.join(cwd, ".pi", "settings.json"),
+			JSON.stringify({ subagentProfiles: { agents: { worker: { thinking: "high" } } } }),
+		);
+		const resolved = resolveAgentProfile(profile, cwd);
+		assert.deepEqual(resolved.resolvedToolGroups, []);
+		assert.equal(resolved.resolvedThinking, "high");
+		assert.deepEqual(selectChildTools(["read", "web_search"], resolved.resolvedToolGroups, false), ["read"]);
+	});
+	it("does not suppress group errors when thinking is also invalid", () => {
+		const { agentDir, cwd } = fixture();
+		write(path.join(agentDir, "agents", "worker.md"), "---\nname: worker\n---\nWork.\n");
+		write(
+			path.join(agentDir, "settings.json"),
+			JSON.stringify({ subagentProfiles: { agents: { worker: { toolGroups: ["typo"], thinking: "typo" } } } }),
+		);
+		const profile = discoverAgentProfiles(cwd).profiles.get("worker");
+		assert.ok(profile);
+		assert.throws(() => resolveAgentProfile(profile, cwd), /toolGroups/);
+		write(
+			path.join(cwd, ".pi", "settings.json"),
+			JSON.stringify({ subagentProfiles: { agents: { worker: { thinking: "high" } } } }),
+		);
+		assert.throws(() => resolveAgentProfile(profile, cwd), /toolGroups/);
+	});
+	it("resolves ordinary valid model, thinking and group overrides together", () => {
+		const { agentDir, cwd } = fixture();
+		write(path.join(agentDir, "agents", "worker.md"), "---\nname: worker\n---\nWork.\n");
+		write(
+			path.join(agentDir, "settings.json"),
+			JSON.stringify({
+				subagentProfiles: { agents: { worker: { model: "provider/model", thinking: "medium", toolGroups: ["web"] } } },
+			}),
+		);
+		const profile = discoverAgentProfiles(cwd).profiles.get("worker");
+		assert.ok(profile);
+		const resolved = resolveAgentProfile(profile, cwd);
+		assert.equal(resolved.resolvedModel, "provider/model");
+		assert.equal(resolved.resolvedThinking, "medium");
+		assert.deepEqual(resolved.resolvedToolGroups, ["web"]);
+		assert.deepEqual(selectChildTools(["read", "web_search", "codegraph_search"], resolved.resolvedToolGroups, false), [
+			"read",
+			"web_search",
+		]);
 	});
 });

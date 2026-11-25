@@ -45,6 +45,9 @@ import * as path from "node:path";
 import type { ExtensionAPI, ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import { registerControlTools } from "./control-tools.js";
 import { MessageRouter } from "./message-router.js";
+import { registerChildToolSelection, toolGroupsFromEnvironment } from "./tool-capabilities.js";
+import { canDelegate } from "./tool-params.js";
+import { DEFAULT_WAIT_TIMEOUT_SECONDS } from "./wait-policy.js";
 
 export { buildSpawnParamsSchema, canDelegate, shouldRunInBackground } from "./tool-params.js";
 
@@ -144,7 +147,7 @@ function widgetSurface(): WidgetSurface | null {
 
 // ─── Helpers ─────────────────────────────────────────────────
 
-const SUPERVISION_REMINDER_MS = 180_000;
+const SUPERVISION_REMINDER_MS = DEFAULT_WAIT_TIMEOUT_SECONDS * 1000;
 
 function toErrorResult(err: unknown): {
 	content: { type: "text"; text: string }[];
@@ -243,7 +246,10 @@ export default function (pi: ExtensionAPI) {
 				.join("; ")
 		: "none";
 
-	registerDiscoveryTools(pi, { registry, recovery, toErrorResult });
+	const managesChildren = canDelegate(HAS_PARENT, ALLOWED_SUBAGENTS);
+	if (HAS_PARENT)
+		registerChildToolSelection(pi, toolGroupsFromEnvironment(process.env.PI_SUBAGENT_TOOL_GROUPS), managesChildren);
+	if (managesChildren) registerDiscoveryTools(pi, { registry, recovery, toErrorResult });
 
 	registerSpawnTool(pi, {
 		hasParent: HAS_PARENT,
@@ -265,16 +271,18 @@ export default function (pi: ExtensionAPI) {
 		toErrorResult,
 	});
 
-	registerMonitoringTools(pi, {
-		registry,
-		captureUi,
-		unreadTranscript,
-		activitySummary,
-		toErrorResult,
-		hasParent: HAS_PARENT,
-	});
+	if (managesChildren)
+		registerMonitoringTools(pi, {
+			registry,
+			captureUi,
+			unreadTranscript,
+			activitySummary,
+			toErrorResult,
+			hasParent: HAS_PARENT,
+		});
 
 	registerControlTools(pi, {
+		canManageChildren: managesChildren,
 		registry,
 		agentId: MY_AGENT_ID,
 		hasParent: HAS_PARENT,

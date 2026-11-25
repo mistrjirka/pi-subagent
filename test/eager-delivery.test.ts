@@ -133,6 +133,7 @@ describe("eager parent tool-result delivery", () => {
 		const text = completionContextContent(fakeAgent("ana"), completion);
 		assert.deepEqual(JSON.parse(text), {
 			status: "completed",
+			taskOutcome: "not_assessed",
 			agent_id: "@ana",
 			result: "Implemented and verified",
 			session_path: null,

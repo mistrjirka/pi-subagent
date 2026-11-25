@@ -1,4 +1,3 @@
-import type { RequestPerformance } from "./request-performance.js";
 /**
  * Tool-result presentation for a spawned child.
  *
@@ -8,6 +7,7 @@ import type { RequestPerformance } from "./request-performance.js";
  */
 import { maybeWriteFullOutput, truncateForContext } from "./notification.js";
 import type { AgentQuestion } from "./protocol.js";
+import type { RequestPerformance } from "./request-performance.js";
 import type { SpawnOutcome } from "./spawn-session.js";
 import type { SubagentDetails } from "./types.js";
 
@@ -55,6 +55,7 @@ function baseDetails(ctx: SpawnPresentationContext): SubagentDetails {
 	return {
 		...(performance ? { lastRequestPerformance: performance } : {}),
 		runtime: "profiled-subagents",
+		taskOutcome: "not_assessed",
 		profile: ctx.profile,
 		treeId: ctx.treeId,
 		parentAgentId: ctx.parentAgentId,
@@ -102,7 +103,7 @@ export function presentFinishedSpawn(
 	if (outcome.status === "completed" && agent.awaitingParent && ctx.pendingQuestion) {
 		const { question, context } = ctx.pendingQuestion;
 		const contextLine = context ? `\nContext: ${context}` : "";
-		const message = `Agent @${agent.agentId} is waiting for your answer:\n${question}${contextLine}\n\nReply to the same agent with agent_send; its context is preserved.`;
+		const message = `Agent @${agent.agentId} is waiting for your answer:\n${question}${contextLine}\n\nReply to the same agent with agent_send kind=answer; its context is preserved.`;
 		return {
 			result: textResult(message, {
 				...base,
@@ -125,7 +126,7 @@ export function presentFinishedSpawn(
 					: outcome.output || "Sub-agent stopped before completing; output may be partial.";
 		return {
 			result: textResult(
-				truncateForContext(message),
+				truncateForContext(message) + maybeWriteFullOutput(agent.agentId, message),
 				{
 					...base,
 					state: agent.status,

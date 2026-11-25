@@ -88,7 +88,7 @@ function harness(t: TestContext) {
 		get transcriptReads() {
 			return transcriptReads;
 		},
-		child(agentId = "bria") {
+		child(agentId = "bria", persistent = true) {
 			let stopCalls = 0;
 			const agent: RegisteredAgent = {
 				agentId,
@@ -96,7 +96,7 @@ function harness(t: TestContext) {
 				status: "running",
 				awaitingParent: false,
 				stoppedByControl: false,
-				persistent: true,
+				persistent,
 				stop: async () => {
 					stopCalls++;
 				},
@@ -392,4 +392,55 @@ describe("compact parent monitoring", () => {
 		await h.inspect({ mode: "full" });
 		assert.deepEqual(h.transcriptRequests[1], { detail: "full", maxMessages: 12, newestFirst: false });
 	});
+});
+
+describe("inspection does not acknowledge unseen completion", () => {
+	for (const resident of [false, true]) {
+		it(`keeps ${resident ? "resident" : "archived"} recent previews compact and preserves delivery`, async (t) => {
+			const h = harness(t);
+			const { agent } = h.child("bria", resident);
+			const output = "RESULT " + "evidence ".repeat(2000) + " END";
+			await h.complete(agent, output);
+			assert.equal(Boolean(h.registry.lookup("bria")), resident);
+			const preview = await h.inspect();
+			assert.ok((preview.content[0]?.text.length ?? 0) <= 2200);
+			assert.ok(h.registry.peekSettlement("bria"), "preview must not consume settlement");
+			const delivered = await h.run({ timeoutSeconds: 0 });
+			assert.equal(delivered.details.alreadyDelivered, undefined);
+			assert.match(delivered.content[0]?.text ?? "", /RESULT/);
+			assert.equal(delivered.details.taskOutcome, "not_assessed");
+			const again = await h.run({ timeoutSeconds: 0 });
+			assert.doesNotMatch(again.content[0]?.text ?? "", /RESULT|evidence/);
+		});
+	}
+});
+
+it("inspection and diagnostics do not consume edited-file deltas", async (t) => {
+	const h = harness(t);
+	const { agent } = h.child();
+	let consumed = false;
+	agent.getMonitoringProgress = (consume = true) => {
+		const editedFiles = consumed ? [] : ["src/changed.ts"];
+		if (consume) consumed = true;
+		return { tools: 1, errors: 0, editedFiles, remainingFiles: 0, totalFiles: 1, shellCalls: 1 };
+	};
+	await h.inspect({ mode: "diagnostics" });
+	assert.equal(consumed, false);
+	await h.inspect();
+	assert.equal(consumed, false);
+	const wait = await h.run({ timeoutSeconds: 0 });
+	assert.match(wait.content[0]?.text ?? "", /src\/changed.ts/);
+	assert.match(wait.content[0]?.text ?? "", /Shell writes may be untracked/);
+	assert.equal(consumed, true);
+});
+
+it("full archived inspection acknowledges only the whole final output", async (t) => {
+	const h = harness(t);
+	const { agent } = h.child("bria", false);
+	await h.complete(agent, "Verified outcome");
+	const full = await h.inspect({ mode: "full" });
+	assert.match(full.content[0]?.text ?? "", /Verified outcome/);
+	assert.equal(h.registry.peekSettlement("bria")?.deliveredInToolResult, true);
+	const wait = await h.run({ timeoutSeconds: 0 });
+	assert.equal(wait.details.alreadyDelivered, true);
 });

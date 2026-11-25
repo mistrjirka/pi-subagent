@@ -56,8 +56,8 @@ describe("supervision wording stays plain", () => {
 			"reminder lost the 150-second cadence",
 		);
 		assert.ok(toolSource.includes("unread transcript page"), "guidelines lost unread transcript paging");
-		assert.ok(toolSource.includes("180-second supervision window"), "guidelines lost the 180-second default");
-		assert.ok(readmeSource.includes("180-second default"), "README lost the 180-second default");
+		assert.ok(toolSource.includes("DEFAULT_WAIT_TIMEOUT_SECONDS"), "guidelines must use the runtime default");
+		assert.ok(readmeSource.includes("150-second default"), "README lost the 150-second default");
 		assert.ok(readmeSource.includes("get_entries(since)"), "README lost the stable entry cursor contract");
 	});
 

@@ -3,6 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
+import { parseToolGroups } from "./tool-capabilities.js";
 
 const THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 
@@ -11,12 +12,15 @@ export interface AgentProfile {
 	description?: string;
 	prompt: string;
 	allowedSubagents: string[];
+	toolGroups?: string[];
 	model?: string;
 	thinking?: string;
 	sourcePath: string;
 }
 
 interface AgentRuntimeOverride {
+	toolGroups?: string[];
+	toolGroupsError?: string;
 	model?: string;
 	thinking?: string;
 }
@@ -61,6 +65,7 @@ interface SettingsFile {
 export interface ResolvedAgentProfile extends AgentProfile {
 	resolvedModel?: string;
 	resolvedThinking?: string;
+	resolvedToolGroups?: string[];
 }
 
 export interface ProfileCatalog {
@@ -112,6 +117,7 @@ function parseProfile(filePath: string): AgentProfile {
 	const name = stringField(frontmatter.name) ?? fallbackName;
 	if (!name) throw new Error(`${filePath}: agent name is empty`);
 	const description = stringField(frontmatter.description);
+	const toolGroups = parseToolGroups(frontmatter.toolGroups);
 	const allowedSubagents = booleanArray(frontmatter.allowed_subagents) ?? [];
 	if (frontmatter.allowed_subagents !== undefined && booleanArray(frontmatter.allowed_subagents) === undefined) {
 		throw new Error(`${filePath}: allowed_subagents must be an array of non-empty agent names`);
@@ -126,6 +132,7 @@ function parseProfile(filePath: string): AgentProfile {
 		...(description ? { description } : {}),
 		prompt: body,
 		allowedSubagents,
+		...(toolGroups !== undefined ? { toolGroups } : {}),
 		...(model ? { model } : {}),
 		...(thinking ? { thinking } : {}),
 		sourcePath: filePath,
@@ -243,10 +250,19 @@ export function discoverAgentProfiles(cwd: string): ProfileCatalog {
 function runtimeOverride(value: unknown): AgentRuntimeOverride | undefined {
 	if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
 	const raw = value as Record<string, unknown>;
+	let toolGroups: string[] | undefined;
+	let toolGroupsError: string | undefined;
+	try {
+		toolGroups = parseToolGroups(raw.toolGroups);
+	} catch (error) {
+		toolGroupsError = String(error);
+	}
 	const model = stringField(raw.model);
 	const thinking = stringField(raw.thinking);
 	if (thinking && !THINKING_LEVELS.has(thinking)) return undefined;
 	return {
+		...(toolGroups !== undefined ? { toolGroups } : {}),
+		...(toolGroupsError ? { toolGroupsError } : {}),
 		...(model ? { model } : {}),
 		...(thinking ? { thinking } : {}),
 	};
@@ -297,6 +313,13 @@ export function resolveAgentProfile(profile: AgentProfile, cwd: string): Resolve
 	const projectSettings = readSettingsFile(path.join(cwd, ".pi", "settings.json")).settings;
 	const globalAgent = globalSettings.agents?.[profile.name];
 	const projectAgent = projectSettings.agents?.[profile.name];
+	const toolOwner = [projectAgent, globalAgent, profile, projectSettings.defaults, globalSettings.defaults].find(
+		(owner) => owner && (owner.toolGroups !== undefined || ("toolGroupsError" in owner && owner.toolGroupsError)),
+	);
+	if (toolOwner && "toolGroupsError" in toolOwner && toolOwner.toolGroupsError) {
+		throw new Error(`${profile.name}: ${toolOwner.toolGroupsError}`);
+	}
+	const resolvedToolGroups = toolOwner?.toolGroups;
 	const resolvedModel =
 		projectAgent?.model ??
 		globalAgent?.model ??
@@ -313,6 +336,7 @@ export function resolveAgentProfile(profile: AgentProfile, cwd: string): Resolve
 		...profile,
 		...(resolvedModel ? { resolvedModel } : {}),
 		...(resolvedThinking ? { resolvedThinking } : {}),
+		...(resolvedToolGroups !== undefined ? { resolvedToolGroups } : {}),
 	};
 }
 

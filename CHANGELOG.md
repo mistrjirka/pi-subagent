@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.6.0 — scoped context and reliable result delivery
+
+- Separate child assignments from parent-only launch decisions. Show role-appropriate tool guidance and omit unavailable child-management tools from leaf workers.
+- Add optional profile/settings `toolGroups`. Existing configurations keep ordinary tools; selected groups retain required workspace, history and parent-communication tools already enabled by Pi.
+- Use one 150-second wait and supervision default. Every waiting response specifies `agent_send kind=answer`; stopping preserves existing file changes.
+- Keep resident and archived recent inspection within 2,200 characters without consuming unseen results or edited-file deltas. Acknowledge actual final delivery once, including repeated waits. Preserve separate full transcript paging.
+- Add explicit `agent_inspect mode=diagnostics` for persisted context metadata, including hidden custom-message types, without content bodies or reasoning. No default diagnostic payload.
+- Bound parent completion previews to 8,000 characters with complete evidence available on demand. Mark task acceptance as not assessed by the runtime; no text-based success heuristic or required completion schema.
+
 ## 0.5.32 — deferred completion reporting
 
 - Record successful edits and errors from code calls that finish after foreground steering, before the child reports completion.

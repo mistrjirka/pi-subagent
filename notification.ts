@@ -9,10 +9,10 @@
  * the shape has a single producer, so it cannot drift by hand.
  */
 
-import { type ExtensionAPI, truncateTail } from "@earendil-works/pi-coding-agent";
-import { stashOverflow, truncationMarker } from "@everyx/pi-ui/context.js";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { AgentCompletion } from "./agent-process.js";
 import type { RegisteredAgent } from "./registry.js";
+import { resultOverflowMarker, resultPreview } from "./result-output.js";
 import type { NotificationDetails } from "./types.js";
 import { agentTitle } from "./views.js";
 
@@ -23,28 +23,27 @@ import { agentTitle } from "./views.js";
  * background notification).
  */
 export function truncateForContext(text: string): string {
-	return truncateTail(text).content;
+	return resultPreview(text);
 }
 
 /**
- * When an output exceeds the context cap, stash the full text (shared
- * primitive in pi-ui/context.ts) and return the LLM-visible marker embedded
+ * When an output exceeds the context cap, stash the full text (bounded
+ * result artifact) and return the LLM-visible marker embedded
  * in the result: the model reads the truncated preview and knows the full
  * output is one `read` away. Returns the marker when truncated, "" otherwise.
  */
 export function maybeWriteFullOutput(agentId: string, output: string): string {
-	const { stashPath } = stashOverflow(output, agentId, { keep: "tail" });
-	return stashPath ? truncationMarker(stashPath) : "";
+	return resultOverflowMarker(agentId, output);
 }
 
 /** The exact content seen by the model, whether through a notification or a tool result. */
 export function completionContextContent(agent: RegisteredAgent, completion: AgentCompletion): string {
 	return JSON.stringify({
 		status: completion.status,
+		taskOutcome: "not_assessed",
 		agent_id: `@${agent.agentId}`,
-		// LLM-context protection: cap the visible result (tail 2000 lines /
-		// 50KB, bash parity) — the full text lives in details.result (card
-		// body, never enters LLM context) and the session file.
+		// Completion is an execution state. Task acceptance remains with the parent.
+		// Keep a bounded head/tail preview; full output is available on demand.
 		result: truncateForContext(completion.output) + maybeWriteFullOutput(agent.agentId, completion.output),
 		// Only a completed persistent agent stays resident (idle) — a
 		// failed follow-up is cleaned up, so no idle claim.
@@ -64,12 +63,13 @@ export function notifyCompletion(
 ): void {
 	const details: NotificationDetails = {
 		status: completion.status,
+		taskOutcome: "not_assessed",
 		agent_id: agent.agentId,
 		label: agentTitle(agent.agentId, agent.label),
 		model: agent.model,
 		thinking: agent.thinking,
 		// Card body (never enters LLM context — verified against convertToLlm).
-		// The full output; the LLM-visible content below is capped (truncateTail).
+		// The full output; the LLM-visible content below is capped (bounded preview).
 		result: completion.output,
 		// Persistent agent completed → resident (idle); a failed follow-up is
 		// reported and cleaned up, so the idle marker must not appear there.

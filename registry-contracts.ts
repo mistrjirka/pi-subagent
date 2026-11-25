@@ -87,7 +87,7 @@ export interface AgentRegistryDeps {
 	) => Promise<void> | void;
 	/** Fallback supervision reminder for a child left running without an active wait/steer. */
 	remind?: (agent: RegisteredAgent, unsupervisedMs: number) => Promise<void> | void;
-	/** Default 3 minutes. Set <= 0 to disable reminders. */
+	/** Default 150 seconds. Set <= 0 to disable reminders. */
 	supervisionIntervalMs?: number;
 	/** Lazy widget access — null in non-TUI modes. */
 	getWidget?: () => WidgetSurface | null;

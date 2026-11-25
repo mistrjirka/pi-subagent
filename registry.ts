@@ -1,3 +1,4 @@
+import { DEFAULT_WAIT_TIMEOUT_SECONDS } from "./wait-policy.js";
 /**
  * pi-subagent — AgentRegistry.
  *
@@ -88,7 +89,7 @@ export class AgentRegistry {
 		this.supervision = new SupervisionService({
 			lookup: (agentId) => this.agents.get(agentId),
 			remind: deps.remind ?? (() => {}),
-			intervalMs: deps.supervisionIntervalMs ?? 180_000,
+			intervalMs: deps.supervisionIntervalMs ?? DEFAULT_WAIT_TIMEOUT_SECONDS * 1000,
 		});
 		this.waits = new AgentWaitCoordinator(this.supervision);
 		this.getWidget = deps.getWidget ?? (() => null);
@@ -143,6 +144,12 @@ export class AgentRegistry {
 		if (expected && settlement !== expected) return undefined;
 		if (settlement) this.pendingAnnouncements.delete(agentId);
 		return settlement;
+	}
+
+	/** A preview is not delivery. Call only after selecting the actual result for return. */
+	acknowledgeSettlement(agentId: string, expected: AgentSettlement): void {
+		const current = this.consumeSettlement(agentId, expected);
+		if (current) current.deliveredInToolResult = true;
 	}
 
 	/** Announce unread completions only when the parent has fully settled. */

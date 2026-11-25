@@ -1,12 +1,14 @@
 /** Pi model-facing tool argument schemas are the single source of static types. */
 import { type Static, Type } from "typebox";
+import { DEFAULT_WAIT_TIMEOUT_SECONDS } from "./wait-policy.js";
 
 const SpawnAgentField = Type.String({
 	description:
 		'Exact name of a configured agent profile: a bundled profile (explore, implementer, debugging-duck by default, plus extended profiles when builtinAgents is "all") or a custom profile from ~/.pi/agent/agents or .pi/agents.',
 });
 const SpawnPromptField = Type.String({
-	description: "The delegated task. Role instructions come from the agent profile and do not need to be repeated here.",
+	description:
+		"Instructions to the selected child: task, scope, constraints, evidence, and required result. Exclude parent-only directions about selecting, starting, resuming, or configuring this child. Its standing role comes from the profile.",
 });
 const SpawnLabelField = Type.Optional(
 	Type.String({ description: "Optional short UI label. Defaults to the agent profile name." }),
@@ -63,16 +65,16 @@ export const WaitParamsSchema = Type.Object({
 	timeout_seconds: Type.Optional(
 		Type.Number({
 			minimum: 0,
-			description:
-				"Optional wait-window timeout in seconds. Expiry returns a live status snapshot and never stops the child. Omit for the default 180-second supervision window; 0 returns an immediate snapshot.",
+			description: `Optional wait-window timeout in seconds. Expiry returns compact progress without stopping the child. Default ${DEFAULT_WAIT_TIMEOUT_SECONDS} seconds; 0 returns an immediate snapshot.`,
 		}),
 	),
 });
 
 export const InspectParamsSchema = Type.Object({
 	mode: Type.Optional(
-		Type.Union([Type.Literal("recent"), Type.Literal("full")], {
-			description: "Recent compact evidence (default), or full paginated transcript. Full has a separate cursor.",
+		Type.Union([Type.Literal("recent"), Type.Literal("full"), Type.Literal("diagnostics")], {
+			description:
+				"Recent compact evidence (default), full paginated evidence, or on-demand persisted context metadata including hidden custom-message types. Modes have independent reads.",
 		}),
 	),
 	agent_id: Type.String({ description: 'The direct child id to inspect (e.g. "@max").' }),
@@ -110,6 +112,17 @@ export const SendParamsSchema = Type.Object({
 		Type.String({ description: "For kind=diagnostic, concrete fresh evidence: file, finding, and validation source." }),
 	),
 });
+
+export function buildSendParamsSchema(hasParent: boolean) {
+	return Type.Object({
+		...SendParamsSchema.properties,
+		to: Type.String({
+			description: hasParent
+				? 'Known in-tree agent id, or "@parent" for the immediate spawning agent.'
+				: "Known direct child id from agent_spawn, agent_list, or a completion notification.",
+		}),
+	});
+}
 
 export const AskParentParamsSchema = Type.Object({
 	question: Type.String({

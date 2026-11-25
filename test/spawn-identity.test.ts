@@ -13,6 +13,7 @@ describe("spawned agent identity contract", () => {
 		);
 		assert.deepEqual(environment, {
 			PI_SUBAGENT_AGENT_ID: "kai",
+			PI_SUBAGENT_TOOL_GROUPS: "",
 			PI_SUBAGENT_PROFILE: "implementer",
 			PI_SUBAGENT_ALLOWED_SUBAGENTS: '["explore","debugging-duck"]',
 			PI_SUBAGENT_TREE_ID: "tree-123",

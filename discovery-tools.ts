@@ -28,7 +28,11 @@ export function registerDiscoveryTools(pi: ExtensionAPI, ports: DiscoveryToolsPo
 		name: "agent_list",
 		label: "List Direct Agents",
 		description:
-			"Read-only list of running, waiting, resident/idle and recently finished direct child agents in this Pi process. Use after compaction or when an agent id is uncertain. After a Pi restart use agent_recover for saved persistent sessions instead.",
+			"Read-only list of running, waiting, resident/idle and recently finished direct child agents in this Pi process. Use after compaction or when an agent id is uncertain. " +
+			(ports.recovery
+				? "After a Pi restart use agent_recover for saved persistent sessions instead."
+				: "Only current-process children are available.") +
+			"",
 		promptSnippet: "Rediscover current direct child agents and their states after context compaction",
 		parameters: DiscoveryParamsSchema,
 		async execute(_callId, raw) {
@@ -51,7 +55,7 @@ export function registerDiscoveryTools(pi: ExtensionAPI, ports: DiscoveryToolsPo
 				"List previous persistent subagent transcripts that can be resumed in the current project and Git branch. Read-only; never starts a child. To continue one, pass its recovery id to agent_spawn.resume_id with a fresh scoped prompt.",
 			promptSnippet: "Find recoverable persistent child contexts after a Pi restart",
 			promptGuidelines: [
-				"Check recoverable agents when resuming substantial implementation after a Pi restart, before assigning fresh exploration.",
+				"Check recoverable agents after a Pi restart unless a fresh context was explicitly requested. Omit resume_id to start fresh.",
 				"Reuse only when the role, project, Git branch, and task acceptance boundary still match. An old transcript is context, not proof that its changes still exist.",
 				"Do not resume a worker already active in another Pi process. Supply the fresh goal, changed requirements and current code state as the new spawn prompt.",
 			],

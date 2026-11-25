@@ -315,3 +315,36 @@ describe("bundled agent profiles", () => {
 		}
 	});
 });
+
+describe("optional tool group configuration", () => {
+	it("preserves old profiles and resolves empty or explicit selections by scope", () => {
+		const { agentDir, cwd } = fixture();
+		write(path.join(agentDir, "agents", "worker.md"), "---\nname: worker\n---\nWork.\n");
+		const plain = discoverAgentProfiles(cwd).profiles.get("worker");
+		assert.ok(plain);
+		assert.equal(resolveAgentProfile(plain, cwd).resolvedToolGroups, undefined);
+		write(
+			path.join(agentDir, "settings.json"),
+			JSON.stringify({
+				subagentProfiles: { defaults: { toolGroups: ["web"] }, agents: { worker: { toolGroups: ["discovery"] } } },
+			}),
+		);
+		assert.deepEqual(resolveAgentProfile(plain, cwd).resolvedToolGroups, ["discovery"]);
+		write(
+			path.join(cwd, ".pi", "settings.json"),
+			JSON.stringify({ subagentProfiles: { agents: { worker: { toolGroups: [] } } } }),
+		);
+		assert.deepEqual(resolveAgentProfile(plain, cwd).resolvedToolGroups, []);
+	});
+	it("rejects an invalid selected group instead of silently activating all tools", () => {
+		const { agentDir, cwd } = fixture();
+		write(path.join(agentDir, "agents", "worker.md"), "---\nname: worker\n---\nWork.\n");
+		write(
+			path.join(agentDir, "settings.json"),
+			JSON.stringify({ subagentProfiles: { agents: { worker: { toolGroups: ["typo"] } } } }),
+		);
+		const profile = discoverAgentProfiles(cwd).profiles.get("worker");
+		assert.ok(profile);
+		assert.throws(() => resolveAgentProfile(profile, cwd), /toolGroups/);
+	});
+});

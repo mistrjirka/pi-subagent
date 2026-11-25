@@ -10,12 +10,12 @@ The runtime deliberately does very little orchestration. The **parent Pi decides
 - **No hardcoded workflow.** Roles come from the optional package bundle (enabled by default) plus Markdown files you own.
 - **No fallback agent.** An unknown agent name is an error.
 - **Plain-text results.** A subagent finishes with ordinary assistant text. There is no required JSON/Zod/structured-output schema.
-- **All normal Pi tools.** The runtime does not impose per-agent tool allowlists.
+- **Optional tool groups.** Existing configurations keep normal Pi tools. Profiles/settings can select optional groups to reduce context while retaining enabled workspace, history, and parent-communication tools. This is not a sandbox.
 - **Explicit delegation.** A child may spawn only exact agent names listed in its profile's `allowed_subagents`. Omitted means none.
 - **Persistent workers.** A child can stay resident after finishing and be continued with `agent_send` in the same context.
-- **Explicit wait.** `agent_wait` uses a 3-minute supervision window by default (or a caller-chosen window); expiry returns compact activity, new tool errors and tracked edited files, and never stops the child.
-- **Fallback supervision.** When the root parent ends a turn with a background/resumed child still running, a 3-minute unsupervised clock starts. The reminder includes latest activity and new tool errors and repeats after later idle turns until the parent waits, inspects, steers, stops, or the child settles.
-- **Escalation path.** `ask_parent` lets a child yield on material ambiguity, a non-obvious diagnosis, or a material implementation decision; its immediate parent answers the same resident context with `agent_send`.
+- **Explicit wait.** `agent_wait` uses a 150-second supervision window by default (or a caller-chosen window); expiry returns compact activity, new tool errors and tracked edited files, and never stops the child.
+- **Fallback supervision.** When the root parent ends a turn with a background/resumed child still running, a 150-second unsupervised clock starts. The reminder includes latest activity and new tool errors and repeats after later idle turns until the parent waits, inspects, steers, stops, or the child settles.
+- **Escalation path.** `ask_parent` lets a child yield on material ambiguity, a non-obvious diagnosis, or a material implementation decision; its immediate parent answers the same resident context with `agent_send kind=answer`.
 - **PiTTy bridge.** Spawn details expose a small direct-control directory for live inspection, steer, and stop. This does not emulate the old `pi-subagents` workflow runtime.
 
 The only forced termination paths are an explicit `agent_stop`, a user/parent abort of a foreground tool call, model/process failure, or teardown of the hosting Pi session (including new/resume/fork transitions).
@@ -117,6 +117,7 @@ order above. This runtime reads the Markdown body plus these frontmatter fields:
 - `model`
 - `thinking`
 - `allowed_subagents`
+- `toolGroups` (optional)
 
 Example implementer:
 
@@ -218,6 +219,23 @@ allowed_subagents: []
 
 The parent/root still owns orchestration and may launch any configured profile. In particular, the implementer should delegate only discovery to `explore`; implementation review remains a parent-owned phase.
 
+## Optional tool groups
+
+Set `toolGroups` in profile frontmatter, or in `subagentProfiles.defaults` / `subagentProfiles.agents.<name>` settings. Precedence matches model/thinking: project agent settings, global agent settings, profile, project defaults, then global defaults. Omitted preserves ordinary tools. An empty list selects only required tools. Invalid selected settings fail instead of silently exposing all tools.
+
+| Group | Optional tools |
+| --- | --- |
+| `discovery` | `codegraph_*`, `semble_*` |
+| `web` | `web_search`, `source_check`, `fetch_content`, `get_search_content` |
+| `browser` | `mcp__playwright*`, `browser_*` |
+| `mcp` | `mcp`, `mcp__*` |
+| `memory_write` | `memory_add`, `memory_replace`, `memory_remove` |
+| `tool:<exact_name>` | One other tool already enabled in Pi |
+
+For example, `toolGroups: [discovery, web]` keeps repository discovery and web research while hiding other optional schemas. Required tools are available only if Pi already enabled them: `read`, `bash`, `edit`, `write`, `code`, `bash_watch`, `bash_output`, `bash_tasks`, `bash_kill`, `session_search`, `user_artifact`, `memory_search`, `memory_read`, `agent_send`, and `ask_parent`. Profiles with `allowed_subagents` also retain child-management tools. Leaf profiles omit those tools and their instructions. Recovery remains root-only.
+
+Selection changes the active registry and model-visible tool schemas. It does not grant tools disabled by another extension and does not restrict what shell code can do. Each spawned profile selects its own groups; nested workers do not accidentally inherit their parent's selection. Root sessions are unchanged.
+
 ## Model and thinking configuration
 
 `agent_spawn` does **not** accept `model`, `thinking`, `tools`, timeout, or budget arguments.
@@ -256,6 +274,8 @@ Both `~/.pi/agent/settings.json` and `<project>/.pi/settings.json` are read. Pro
 ## Tools
 
 ### `agent_spawn`
+
+Address `prompt` to the selected child: task, scope, constraints, evidence, and required result. Resolve parent-only selection, recovery and configuration before the call. Omit `resume_id` for a fresh context. Keep substantive requirements such as independent verification or avoiding a rejected approach in the task.
 
 ```json
 {
@@ -339,19 +359,24 @@ Wait for a direct child that is running in the background or has been resumed wi
 { "agent_id": "@max" }
 ```
 
-With no explicit timeout, `agent_wait` uses a **180-second supervision window**. It returns sooner if the child completes/fails/stops or reaches `ask_parent`. If the child settled earlier in the current parent turn, `agent_wait` consumes that cached settlement and suppresses the otherwise-pending completion/question notification, so the same result is not delivered again after the turn. If the child is still running after 3 minutes, it returns latest activity, tool-result and error counts, a bounded latest assistant update, and tracked edited files since the last check. No transcript is injected. The child keeps running. `timeout_seconds` changes only this wait window:
+With no explicit timeout, `agent_wait` uses a **150-second supervision window**. It returns sooner if the child completes/fails/stops or reaches `ask_parent`. If the child settled earlier in the current parent turn, `agent_wait` consumes that cached settlement and suppresses the otherwise-pending completion/question notification, so the same result is not delivered again after the turn. If the child is still running after 150 seconds, it returns latest activity, tool-result and error counts, a bounded latest assistant update, and tracked edited files since the last check. No transcript is injected. The child keeps running. `timeout_seconds` changes only this wait window:
 
 ```json
 { "agent_id": "@max", "timeout_seconds": 150 }
 ```
 
-When the 150-second window expires, the result says the child is still running and includes its compact progress status, without copying tool arguments, successful tool outputs or thinking into the parent context. Compare new evidence with the assigned scope and last correction to judge whether the child is making real progress. Read recent evidence with `agent_inspect` only to resolve a problem or decision, and use its full mode when needed. If progress remains aligned, wait again without reassurance messages, document updates, or repeated audits. Inspect or steer with `agent_send` for a concrete blocker, scope drift, repeated failure, or necessary coordination. Stop the child when needed. A timeout or long-running command alone is not a stall. Use completion results already delivered rather than fetching them again. `timeout_seconds: 0` is an immediate status snapshot. Omitting the field uses the 180-second default.
+When the 150-second window expires, the result says the child is still running and includes its compact progress status, without copying tool arguments, successful tool outputs or thinking into the parent context. Compare new evidence with the assigned scope and last correction to judge whether the child is making real progress. Read recent evidence with `agent_inspect` only to resolve a problem or decision, and use its full mode when needed. If progress remains aligned, wait again without reassurance messages, document updates, or repeated audits. Inspect or steer with `agent_send` for a concrete blocker, scope drift, repeated failure, or necessary coordination. Stop the child when needed. A timeout or long-running command alone is not a stall. Use completion results already delivered rather than fetching them again. `timeout_seconds: 0` is an immediate status snapshot. Omitting the field uses the 150-second default.
 
-For root background/resumed children, the runtime also has a fallback supervision reminder: when the root parent ends its turn with a child still running, it starts a 3-minute unsupervised clock. If the parent has not resumed supervision before that window expires, the runtime injects a follow-up telling the parent to check the child and includes the latest activity. A new parent turn pauses the clock; if that turn ends with the child still running, a fresh 3-minute window begins. This is **not** a task timeout and never cancels the child.
+For root background/resumed children, the runtime also has a fallback supervision reminder: when the root parent ends its turn with a child still running, it starts a 150-second unsupervised clock. If the parent has not resumed supervision before that window expires, the runtime injects a follow-up telling the parent to check the child and includes the latest activity. A new parent turn pauses the clock; if that turn ends with the child still running, a fresh 150-second window begins. This is **not** a task timeout and never cancels the child.
 
 Use `agent_wait` instead of shell `sleep`/poll loops when waiting for subagents. Ordinary external processes may use their process/job wait mechanisms.
 
 ### `agent_inspect`
+
+Recent previews have a 2,200-character total budget for both resident and archived children. They do not acknowledge final delivery or consume tracked edited-file deltas. Use `agent_wait` to receive the final result. Repeated waits report that the result was already delivered. A full inspection acknowledges delivery only when it includes the complete settled result.
+
+Use `{"agent_id":"@max","mode":"diagnostics"}` only to diagnose context construction. This reports persisted system-section character counts, registered tool count, message roles, and hidden custom-message types. It does not print message bodies or reasoning. It uses an independent bounded read of the first context window and does not claim to show the provider's actual wire input.
+
 
 Read a direct child's state and recent compact evidence without changing the child:
 
@@ -401,6 +426,8 @@ The child yields the current turn and remains resident. The immediate spawning a
 Use this for material ambiguity/missing information or when unexpected evidence invalidates the route and resolving it requires non-obvious diagnosis or a material decision. Include the smallest safe reproduction or exact steps, decisive evidence, what requirement or route is blocked/invalidated, and the specific parent decision needed; routine implementation choices and obvious local fixes stay with the child.
 
 ### `agent_stop`
+
+Stopping ends execution and removes the resident process. Existing file changes remain. Steer recoverable mistakes first; inspect existing changes before deciding to start a replacement.
 
 Explicitly terminate a running or resident child.
 
@@ -454,3 +481,7 @@ pnpm test
 ```
 
 This fork preserves the original MIT license and credits the upstream implementation history.
+
+### Completion output and acceptance
+
+`completed` describes turn settlement. The runtime reports `taskOutcome: "not_assessed"`; the parent checks the assignment against the evidence. Children return ordinary text, with no required JSON outcome or compulsory tool call. Parent-visible results preserve up to 8,000 characters from the beginning and end. When truncated, a private full-output file and the persisted session retain the complete evidence. Repeated delivery of the same result reuses its artifact reference.

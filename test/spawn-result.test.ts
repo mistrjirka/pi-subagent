@@ -53,6 +53,7 @@ describe("typed spawn result presenter", () => {
 		assert.equal(normal.result.content[0]!.text, "done");
 		assert.equal(normal.treeRemoval, "done");
 		assert.equal(normal.result.details.sessionId, "session-id");
+		assert.equal(normal.result.details.taskOutcome, "not_assessed");
 
 		const resident = presentFinishedSpawn(finished({ resident: true }), context(), true);
 		assert.match(resident.result.content[0]!.text, /resident/);
@@ -81,6 +82,7 @@ describe("typed spawn result presenter", () => {
 		ctx.pendingQuestion = { from: "max", question: "Choose a path", context: "Two legal options" };
 		const result = presentFinishedSpawn(finished({ resident: true }), ctx, true);
 		assert.match(result.result.content[0]!.text, /waiting for your answer/);
+		assert.match(result.result.content[0]!.text, /kind=answer/);
 		assert.equal(result.result.details.waitingForParent, true);
 		assert.equal(result.result.details.question, "Choose a path");
 		assert.equal(result.treeRemoval, undefined);

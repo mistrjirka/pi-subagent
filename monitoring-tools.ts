@@ -5,7 +5,8 @@
 import type { ExtensionAPI, ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import { reportedAgentState } from "./agent-state.js";
 import type { AgentActivity } from "./event-interpret.js";
-import { formatEditedFiles, formatMonitoringProgress } from "./monitoring-progress.js";
+import { inspectContextDiagnostics } from "./inspection-diagnostics.js";
+import { excerpt, formatEditedFiles, formatMonitoringProgress } from "./monitoring-progress.js";
 import { maybeWriteFullOutput, truncateForContext } from "./notification.js";
 import { formatParentMessage } from "./protocol.js";
 import type { AgentRegistry, AgentSettlement, AgentWaitEvent, RegisteredAgent } from "./registry.js";
@@ -13,7 +14,7 @@ import { InspectParamsSchema, WaitParamsSchema } from "./tool-params.js";
 import type { IncrementalMonitoringTranscript } from "./transcript.js";
 import { atId } from "./views.js";
 import { registerWaitInput } from "./wait-input.js";
-import { resolveWaitTimeoutSeconds } from "./wait-policy.js";
+import { DEFAULT_WAIT_TIMEOUT_SECONDS, resolveWaitTimeoutSeconds } from "./wait-policy.js";
 
 type ErrorToolResult = {
 	content: Array<{ type: "text"; text: string }>;
@@ -42,13 +43,12 @@ export function registerMonitoringTools(pi: ExtensionAPI, ports: MonitoringPorts
 	pi.registerTool({
 		name: "agent_wait",
 		label: "Wait for Agent",
-		description:
-			"Wait for a direct child to settle, fail/stop, ask its parent a question, or receive any child message to @parent. Child messages wake the wait immediately. Accepted user messages (steering and follow-ups) also release the wait when supported by the host. timeout_seconds limits this call; expiry returns compact activity, tool errors and tracked edited files. None stops the child. Default 180 seconds.",
+		description: `Wait for a direct child to settle or ask a question, or receive any child message. Accepted user input also releases the wait. Default ${DEFAULT_WAIT_TIMEOUT_SECONDS} seconds; expiry returns compact progress without stopping the child. Completion reports turn settlement, not acceptance of the task.`,
 		promptSnippet: "Wait for a background or resumed child to settle",
 		promptGuidelines: [
-			"Use agent_wait when a background child's result becomes the next dependency instead of shell sleep or polling. This applies to subagents, not ordinary external processes with process/job wait mechanisms. Use completion results already delivered rather than fetching them again.",
+			"Use agent_wait when a child's result becomes the next dependency instead of shell sleep or polling. This applies to subagents, not ordinary external processes with process/job wait mechanisms. Use completion results already delivered rather than fetching them again.",
 			"For supervision, keep a 150-second wait window. Compare new evidence with the assigned scope and last correction to check whether the child is making real progress. Inspect or steer for a concrete blocker, scope drift, repeated failure or necessary coordination; stop when needed. On timeout, agent_wait reports compact progress, not a transcript. Use agent_inspect only to resolve a problem or decision. If progress remains aligned, wait again without reassurance messages, document updates, or repeated audits. A timeout or long-running command alone is not a stall.",
-			"If timeout_seconds is omitted, agent_wait uses a 180-second supervision window. timeout_seconds: 0 returns an immediate live snapshot.",
+			`Default wait: ${DEFAULT_WAIT_TIMEOUT_SECONDS} seconds. timeout_seconds: 0 returns an immediate live snapshot.`,
 			"If agent_wait returns an ask_parent question, answer that same child with agent_send kind=answer. Wait again only when its resumed result is needed.",
 			"If agent_wait returns an ordinary message from any child, handle it immediately. The child remains running. Reply with agent_send if needed, then resume supervision.",
 			"If agent_wait ends because new user input arrived, handle that input before waiting again. Child agents continue in the background.",
@@ -189,7 +189,7 @@ export function registerMonitoringTools(pi: ExtensionAPI, ports: MonitoringPorts
 					content: [
 						{
 							type: "text",
-							text: `Agent ${atId(agentId)} is waiting for your answer:\n${settlement.question.question}${contextLine}\n\nReply with agent_send; its context is preserved.`,
+							text: `Agent ${atId(agentId)} is waiting for your answer:\n${settlement.question.question}${contextLine}\n\nReply with agent_send kind=answer; its context is preserved.`,
 						},
 					],
 					details: {
@@ -204,6 +204,7 @@ export function registerMonitoringTools(pi: ExtensionAPI, ports: MonitoringPorts
 				};
 			}
 			const output = truncateForContext(completion.output) + maybeWriteFullOutput(agentId, completion.output);
+			registry.acknowledgeSettlement(agentId, settlement);
 			const progress = registry.lookup(agentId)?.getMonitoringProgress?.() ?? completion.progress;
 			return {
 				content: [
@@ -217,6 +218,7 @@ export function registerMonitoringTools(pi: ExtensionAPI, ports: MonitoringPorts
 				details: {
 					agentId,
 					state: completion.status,
+					taskOutcome: "not_assessed",
 					error: completion.status === "completed" ? undefined : completion.output || completion.status,
 					sessionPath: completion.sessionPath,
 					sessionId: completion.sessionId,
@@ -233,7 +235,7 @@ export function registerMonitoringTools(pi: ExtensionAPI, ports: MonitoringPorts
 		name: "agent_inspect",
 		label: "Inspect Agent",
 		description:
-			"Read a direct child's state, tracked edited files and compact recent evidence (default). Set mode=full for a separate detailed transcript cursor. Does not stop or steer the child.",
+			"Read a direct child's state, tracked edited files and compact recent evidence (default). Set mode=full for detailed evidence or mode=diagnostics for persisted context metadata. Recent previews never acknowledge final delivery. Does not stop or steer the child.",
 		promptSnippet: "Inspect recent child evidence or a full unread transcript page",
 		promptGuidelines: [
 			"Use agent_inspect when supervision needs more evidence than the compact wait status. Recent mode skips thinking and echoed instructions, shortens tool arguments and results, and starts with the newest unread evidence.",
@@ -254,64 +256,64 @@ export function registerMonitoringTools(pi: ExtensionAPI, ports: MonitoringPorts
 			if (!Number.isInteger(maxMessages) || maxMessages < 1 || maxMessages > 30) {
 				return toErrorResult("`max_messages` must be an integer from 1 to 30.");
 			}
-			if (!agent) {
-				if (!settled) return toErrorResult(`Unknown direct child ${atId(agentId)}.`);
-				if (full && settled.completion.sessionPath) {
-					const transcript = await unreadTranscript(
-						{ agentId, sessionPath: settled.completion.sessionPath },
-						{
-							maxMessages,
-							maxChars: 20_000,
-							perMessageChars: 2_000,
-							detail: "full",
-						},
-					);
-					if (
-						!transcript.hasMore &&
-						settled.completion.output.trim() &&
-						transcript.text.includes(settled.completion.output)
-					) {
-						registry.consumeSettlement(agentId, settled);
-					}
-					return {
-						content: [
-							{
-								type: "text",
-								text:
-									`${atId(agentId)} — ${settled.completion.status}; process exited.\n${formatEditedFiles(settled.completion.progress)}\n\nUnread full transcript:\n${transcript.text}` +
-									(transcript.hasMore ? "\nMore full history available." : ""),
-							},
-						],
-						details: {
-							agentId,
-							state: settled.completion.status,
-							archived: true,
-							transcript,
-							sessionPath: settled.completion.sessionPath,
-						},
-					};
-				}
-				registry.consumeSettlement(agentId, settled);
+			if (!agent && !settled) return toErrorResult(`Unknown direct child ${atId(agentId)}.`);
+			if (params.mode === "diagnostics") {
 				return {
 					content: [
-						{
-							type: "text",
-							text:
-								`${atId(agentId)} — ${settled.completion.status}; process exited.\n\n${truncateForContext(settled.completion.output)}` +
-								maybeWriteFullOutput(agentId, settled.completion.output) +
-								(settled.completion.progress ? "\n\n" + formatEditedFiles(settled.completion.progress) : "") +
-								(settled.completion.sessionPath ? "\nSession: " + settled.completion.sessionPath : ""),
-						},
+						{ type: "text", text: inspectContextDiagnostics(agent?.sessionPath ?? settled?.completion.sessionPath) },
 					],
+					details: { agentId, mode: "diagnostics", taskOutcome: "not_assessed" },
+				};
+			}
+			if (!agent) {
+				// Archived and resident recent previews have the same budget and delivery semantics.
+				if (!settled) return toErrorResult(`Unknown direct child ${atId(agentId)}.`);
+				const completion = settled.completion;
+				const transcript = completion.sessionPath
+					? await unreadTranscript(
+							{ agentId, sessionPath: completion.sessionPath },
+							{
+								maxMessages,
+								maxChars: full ? 20_000 : 2_200,
+								perMessageChars: full ? 2_000 : 420,
+								detail: full ? "full" : "recent",
+							},
+							!full,
+						)
+					: undefined;
+				const preview =
+					transcript?.text ||
+					(full
+						? truncateForContext(completion.output) + maybeWriteFullOutput(agentId, completion.output)
+						: excerpt(completion.output, 1500));
+				const deliveredWholeResult =
+					full &&
+					!settled.waitingForParent &&
+					completion.output.trim() &&
+					(transcript
+						? !transcript.hasMore && transcript.text.includes(completion.output)
+						: preview === completion.output);
+				if (deliveredWholeResult) registry.acknowledgeSettlement(agentId, settled);
+				const text =
+					`${atId(agentId)} — ${completion.status}; process exited.\n${formatEditedFiles(completion.progress)}\n\n${full ? "Unread full transcript" : "Recent evidence"}:\n${preview}` +
+					(full
+						? transcript?.hasMore
+							? "\nMore full history available."
+							: ""
+						: "\nPreview only. Use agent_wait for final delivery or mode=full for details.");
+				return {
+					content: [{ type: "text", text: full ? text : excerpt(text, 2200) }],
 					details: {
 						agentId,
-						state: settled.completion.status,
+						state: completion.status,
 						archived: true,
-						sessionPath: settled.completion.sessionPath,
+						taskOutcome: "not_assessed",
+						sessionPath: completion.sessionPath,
+						transcript,
 					},
 				};
 			}
-			const progress = agent.getMonitoringProgress?.();
+			const progress = agent.getMonitoringProgress?.(false);
 			const transcript = await unreadTranscript(
 				agent,
 				{
@@ -332,7 +334,7 @@ export function registerMonitoringTools(pi: ExtensionAPI, ports: MonitoringPorts
 				settled.completion.output.trim() &&
 				transcript.text.includes(settled.completion.output)
 			) {
-				registry.consumeSettlement(agentId, settled);
+				registry.acknowledgeSettlement(agentId, settled);
 			}
 			const activity = agent.getLatestActivity?.();
 			const elapsedMs = agent.startedAt ? Date.now() - agent.startedAt : undefined;
@@ -341,13 +343,14 @@ export function registerMonitoringTools(pi: ExtensionAPI, ports: MonitoringPorts
 				content: [
 					{
 						type: "text",
-						text:
+						text: (full ? (value: string) => value : (value: string) => excerpt(value, 2200))(
 							`${atId(agentId)} — ${reportedAgentState(agent)}; latest activity: ${activitySummary(activity)}\n${formatMonitoringProgress(progress, false)}\n\n${full ? "Unread full transcript" : "Recent evidence (newest first)"} (${transcript.returnedMessages} shown; ${transcript.source}):\n${transcript.text}` +
-							(full && transcript.hasMore
-								? "\nMore full history available."
-								: !full
-									? "\nUse mode=full for detailed history."
-									: ""),
+								(full && transcript.hasMore
+									? "\nMore full history available."
+									: !full
+										? "\nUse mode=full for detailed history."
+										: ""),
+						),
 					},
 				],
 				details: {
@@ -355,6 +358,7 @@ export function registerMonitoringTools(pi: ExtensionAPI, ports: MonitoringPorts
 					label: agent.label,
 					progress,
 					state: reportedAgentState(agent),
+					taskOutcome: "not_assessed",
 					activity,
 					transcript: transcript.text,
 					transcriptSource: transcript.source,

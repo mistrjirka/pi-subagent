@@ -39,7 +39,7 @@ type RegisteredTool = {
 	): Promise<unknown>;
 };
 
-function harness(hasParent = false) {
+function harness(hasParent = false, canManageChildren = true) {
 	const registered = new Map<string, RegisteredTool>();
 	const pi = {
 		registerTool(tool: unknown) {
@@ -57,6 +57,7 @@ function harness(hasParent = false) {
 		registry: workerRegistry,
 		agentId: hasParent ? "root-child" : "",
 		hasParent,
+		canManageChildren,
 		captureUi: () => {},
 		setStatus: (key, value) => statuses.push({ key, value }),
 		routeMessage: async (message, outbound, answer) => {
@@ -264,4 +265,9 @@ describe("extracted control tools", () => {
 		assert.equal(JSON.parse(h.statuses[0]?.value ?? "{}").from, "root-child");
 		assert.equal(JSON.parse(h.statuses[0]?.value ?? "{}").question, "Which schema?");
 	});
+});
+
+it("leaf control tools preserve parent communication without exposing child stop", () => {
+	const h = harness(true, false);
+	assert.deepEqual([...h.registered.keys()].sort(), ["agent_send", "ask_parent"]);
 });

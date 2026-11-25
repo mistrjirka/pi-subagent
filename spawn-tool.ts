@@ -1,4 +1,3 @@
-import { recordSubagentPerformance } from "./model-performance-journal.js";
 /** Registers agent_spawn. The root owns registries and cleanup; this owns one launch. */
 import * as path from "node:path";
 import type { ExtensionAPI, ExtensionUIContext } from "@earendil-works/pi-coding-agent";
@@ -6,6 +5,7 @@ import { AgentProcess } from "./agent-process.js";
 import type { AgentActivity } from "./event-interpret.js";
 import { ExternalControlBridge } from "./external-control.js";
 import { createLiveChannels } from "./live-output.js";
+import { recordSubagentPerformance } from "./model-performance-journal.js";
 import type { AgentMessage, AgentQuestion } from "./protocol.js";
 import type { RecoveryStore } from "./recovery.js";
 import type { AgentRegistry } from "./registry.js";
@@ -80,11 +80,17 @@ export function registerSpawnTool(pi: ExtensionAPI, ports: SpawnToolPorts): void
 			promptSnippet: `Delegate to a configured agent (${ports.spawnableSummary})`,
 			promptGuidelines: [
 				"Choose an exact configured agent name. Unknown agents fail; there is no fallback role.",
-				"The profile already contains stable role instructions. Put only the concrete task, relevant paths/evidence, constraints, and desired result in prompt.",
+				"Address prompt to the selected child. Include its task, scope, constraints, evidence and required result. Keep parent-only launch decisions out; preserve requirements such as independently checking earlier conclusions or avoiding a rejected approach.",
 				"Nested delegation is explicit: a sub-agent can spawn only names listed in its allowed_subagents profile field.",
-				"If a child returns a question, answer that same resident child with agent_send instead of starting a replacement.",
-				"For substantial resumptions after a restart, use agent_recover first. A matching recovery id loads the saved child context; this prompt remains a fresh instruction. Never guess a recovery id or resume across project/branch/task boundaries.",
-				"The root chooses foreground/background per spawn. Several independent root spawns may run concurrently; background execution is root-only.",
+				"If a child returns a question, answer that same resident child with agent_send kind=answer instead of starting a replacement.",
+				...(!hasParent
+					? [
+							"Resolve recovery before spawning. Omit resume_id when a fresh context is required. Otherwise use agent_recover after a restart and resume only a matching project, branch, role and task. The prompt is a new instruction, not a launch command.",
+							"Choose foreground/background with the tool field. Several independent spawns may run concurrently.",
+						]
+					: [
+							"Nested spawns are foreground. Issue independent tool calls together when their work does not interfere.",
+						]),
 			],
 			parameters: schema,
 
@@ -239,7 +245,14 @@ export function registerSpawnTool(pi: ExtensionAPI, ports: SpawnToolPorts): void
 						: {}),
 					// Identity for in-tree messaging: PI_SUBAGENT_AGENT_ID marks this
 					// process as a child (agent_send is registered on every instance).
-					env: childIdentityEnvironment(agentId, profile, treeId, parentAgentId, process.env.PI_SUBAGENT_ANCESTOR_IDS),
+					env: childIdentityEnvironment(
+						agentId,
+						profile,
+						treeId,
+						parentAgentId,
+						process.env.PI_SUBAGENT_ANCESTOR_IDS,
+						runtimeProfile.resolvedToolGroups,
+					),
 					// Child→parent messages re-enter the router on this hop. Tree telemetry
 					// from deeper spawns forwards up (depth + 1) or lands on the root widget.
 					onMessage: ports.onChildMessage,

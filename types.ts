@@ -29,6 +29,8 @@ export type RenderEvent =
  * views (views.ts) and the notification card (render.ts).
  */
 export type SubagentDetails = {
+	/** Runtime settlement does not assess task acceptance. */
+	taskOutcome?: "not_assessed";
 	lastRequestPerformance?: RequestPerformance;
 	task?: string;
 	/** Identifies this fork's direct-control integration to external UIs. */
@@ -73,6 +75,7 @@ export type SubagentDetails = {
  */
 export interface NotificationDetails {
 	status: string;
+	taskOutcome?: "not_assessed";
 	agent_id: string;
 	/** Required — always passed by notifyCompletion (AgentProcess.label). */
 	label: string;

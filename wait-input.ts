@@ -70,7 +70,9 @@ export function registerWaitInput(pi: ExtensionAPI): {
 				parentSignal?.addEventListener("abort", onParentAbort, { once: true });
 				// Input may already be queued when this tool starts. Do not require
 				// a second input_queued event to release this wait.
-				if (ctx.hasPendingMessages()) wait.interrupt();
+				// New runtimes distinguish accepted user input from background notifications.
+				const inputContext = ctx as ExtensionContext & { hasPendingUserInput?: () => boolean };
+				if (inputContext.hasPendingUserInput?.() ?? ctx.hasPendingMessages()) wait.interrupt();
 			}
 			return {
 				signal: controller.signal,

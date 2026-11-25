@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.32 — deferred completion reporting
+
+- Record successful edits and errors from code calls that finish after foreground steering, before the child reports completion.
+- Show saved completion events in recent and full inspection without exposing Python checkpoints.
+- Count deferred evidence once, including when a later wait reads the same result.
+- Use the precise accepted-user-input query when available so queued background notifications do not interrupt `agent_wait` as user messages.
+
 ## 0.5.31 — compact subagent monitoring
 
 - Return incremental tool errors and attributable edited files on wait timeouts, without copying child transcripts.

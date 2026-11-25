@@ -51,7 +51,7 @@ export class SessionEntryCursor {
 							if (record.type !== "session") {
 								entries.push(entry);
 								if (typeof record.id === "string") this.positions.set(record.id, this.scannedTo);
-								if (record.type === "message") messages++;
+								if (record.type === "message" || record.type === "tool_completion") messages++;
 							}
 						}
 					}

@@ -53,6 +53,8 @@ export class MonitoringProgressTracker {
 	private readonly pending = new Map<string, { name: string; path?: string }>();
 	private readonly changed = new Set<string>();
 	private readonly total = new Set<string>();
+	private readonly nestedResults = new Set<string>();
+	private readonly completions = new Set<string>();
 	private tools = 0;
 	private errors = 0;
 	private shellCalls = 0;
@@ -88,7 +90,49 @@ export class MonitoringProgressTracker {
 		}
 	}
 
+	/** Completion entries finish an earlier call. They are not another tool invocation. */
+	private completed(entry: Record<string, unknown>): void {
+		const id = entry.toolCallId;
+		const result = object(entry.result);
+		if (typeof id !== "string" || !result || entry.toolName !== "code" || this.completions.has(id)) return;
+		this.remember(this.completions, id);
+		if (object(result.details)?.status === "error") {
+			this.errors++;
+			this.lastError = excerpt(contentText(result.content), 220) || "code failed";
+		}
+		this.recordNested(result.nestedCalls);
+	}
+
+	private remember(seen: Set<string>, id: string): void {
+		seen.add(id);
+		if (seen.size > 1024) {
+			const oldest = seen.values().next().value;
+			if (oldest !== undefined) seen.delete(oldest);
+		}
+	}
+
+	private recordNested(value: unknown): void {
+		for (const nested of records(object(value)?.calls)) {
+			if (nested.status !== "ok" && nested.status !== "error" && nested.status !== "failed") continue;
+			if (typeof nested.id === "string") {
+				if (this.nestedResults.has(nested.id)) continue;
+				this.remember(this.nestedResults, nested.id);
+			}
+			if (nested.name === "bash") this.shellCalls++;
+			if (nested.status === "ok") this.recordWrite(nested.name, object(nested.arguments)?.path);
+			else {
+				this.errors++;
+				this.lastError ??= `nested ${typeof nested.name === "string" ? nested.name : "tool"} failed`;
+			}
+		}
+	}
+
 	handle(event: RpcEvent): void {
+		if (event.type === "entry_appended") {
+			const entry = object(event.entry);
+			if (entry?.type === "tool_completion") this.completed(entry);
+			return;
+		}
 		if (event.type === "tool_execution_start") {
 			this.rememberCall(event.toolCallId, event.toolName, event.args);
 			return;
@@ -110,7 +154,7 @@ export class MonitoringProgressTracker {
 		if (id) this.pending.delete(id);
 		this.tools++;
 		if (message.toolName === "bash") this.shellCalls++;
-		if (message.isError === true) {
+		if (message.isError === true || (message.toolName === "code" && object(message.details)?.status === "error")) {
 			this.errors++;
 			this.lastError = excerpt(contentText(message.content), 220) || message.toolName;
 		} else if (call?.name === message.toolName) {
@@ -118,16 +162,7 @@ export class MonitoringProgressTracker {
 		}
 		// code's typed nestedCalls envelope records individual outcomes. A
 		// failed outer code call may still have successfully edited a file.
-		if (message.toolName === "code") {
-			for (const nested of records(object(message.nestedCalls)?.calls)) {
-				if (nested.name === "bash") this.shellCalls++;
-				if (nested.status === "ok") this.recordWrite(nested.name, object(nested.arguments)?.path);
-				else if (nested.status === "error" || nested.status === "failed") {
-					this.errors++;
-					this.lastError ??= `nested ${typeof nested.name === "string" ? nested.name : "tool"} failed`;
-				}
-			}
-		}
+		if (message.toolName === "code") this.recordNested(message.nestedCalls);
 	}
 
 	snapshot(consume = true): MonitoringProgress {

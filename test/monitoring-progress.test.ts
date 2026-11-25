@@ -72,6 +72,139 @@ describe("compact monitoring progress", () => {
 		assert.equal(a.snapshot().totalFiles, 2);
 	});
 
+	it("reports deferred edits before settlement without counting them again on collection", () => {
+		const tracker = new MonitoringProgressTracker("/repo");
+		tracker.handle({
+			type: "message_end",
+			message: {
+				role: "toolResult",
+				toolName: "code",
+				toolCallId: "cell-run",
+				content: [],
+				details: { status: "running", state: "PRIVATE_STATE" },
+				nestedCalls: {
+					calls: [
+						{ id: "early", name: "edit", status: "ok", arguments: { path: "src/early.ts" } },
+						{ id: "late", name: "write", status: "unfinished", arguments: { path: "src/late.ts" } },
+						{ id: "shell", name: "bash", status: "unfinished", arguments: { command: "PRIVATE_COMMAND" } },
+					],
+				},
+			},
+		});
+		const initial = tracker.snapshot();
+		assert.equal(initial.tools, 1);
+		assert.deepEqual(initial.editedFiles, ["src/early.ts"]);
+		const nestedCalls = {
+			calls: [
+				{ id: "late", name: "write", status: "ok", arguments: { path: "src/late.ts", content: "PRIVATE_CONTENT" } },
+				{ id: "shell", name: "bash", status: "error" },
+			],
+		};
+		const completion = {
+			type: "entry_appended",
+			entry: {
+				type: "tool_completion",
+				id: "completion-1",
+				toolName: "code",
+				toolCallId: "cell-run",
+				result: { content: [], details: { status: "suspended", state: "PRIVATE_STATE" }, nestedCalls },
+			},
+		};
+		tracker.handle(completion);
+		const finished = tracker.snapshot();
+		assert.equal(finished.tools, 0);
+		assert.equal(finished.errors, 1);
+		assert.equal(finished.shellCalls, 1);
+		assert.equal(finished.totalFiles, 2);
+		assert.deepEqual(finished.editedFiles, ["src/late.ts"]);
+		assert.doesNotMatch(formatMonitoringProgress(finished), /PRIVATE_/);
+		tracker.handle(completion);
+		tracker.handle({
+			type: "message_end",
+			message: {
+				role: "toolResult",
+				toolName: "code",
+				toolCallId: "cell-wait",
+				content: [],
+				nestedCalls,
+			},
+		});
+		const repeated = tracker.snapshot();
+		assert.equal(repeated.tools, 1);
+		assert.equal(repeated.errors, 0);
+		assert.equal(repeated.shellCalls, 0);
+		assert.deepEqual(repeated.editedFiles, []);
+	});
+
+	it("shows Python errors even when the outer tool transport succeeded", () => {
+		const tracker = new MonitoringProgressTracker("/repo");
+		tracker.handle({
+			type: "message_end",
+			message: {
+				role: "toolResult",
+				toolName: "code",
+				toolCallId: "failed",
+				isError: false,
+				content: [{ type: "text", text: "NameError: missing variable" }],
+				details: { status: "error" },
+			},
+		});
+		assert.equal(tracker.snapshot().errors, 1);
+		tracker.handle({
+			type: "entry_appended",
+			entry: {
+				type: "tool_completion",
+				toolCallId: "later-failure",
+				toolName: "code",
+				result: {
+					content: [{ type: "text", text: "RuntimeError after writing" }],
+					details: { status: "error" },
+					nestedCalls: { calls: [{ id: "written", name: "write", status: "ok", arguments: { path: "saved.txt" } }] },
+				},
+			},
+		});
+		const progress = tracker.snapshot();
+		assert.equal(progress.tools, 0);
+		assert.equal(progress.errors, 1);
+		assert.match(progress.lastError ?? "", /RuntimeError/);
+		assert.deepEqual(progress.editedFiles, ["saved.txt"]);
+	});
+
+	it("includes deferred completion entries in recent and full inspection without checkpoint data", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-deferred-inspect-"));
+		try {
+			const sessionPath = join(dir, "child.jsonl");
+			const entries = [1, 2].map((index) => ({
+				type: "tool_completion",
+				id: `completion-${index}`,
+				toolName: "code",
+				toolCallId: `cell-${index}`,
+				result: {
+					content: [{ type: "text", text: `finished operation ${index}` }],
+					details: { status: index === 2 ? "error" : "ok", state: "PRIVATE_CHECKPOINT" },
+				},
+			}));
+			writeFileSync(sessionPath, entries.map((entry) => JSON.stringify(entry)).join("\n") + "\n");
+			const recent = new IncrementalTranscriptCursor();
+			const first = await recent.readRecent({ sessionPath }, { detail: "recent" });
+			assert.match(first.text, /tool completion \(code ERROR\): finished operation 2/);
+			assert.doesNotMatch(first.text, /PRIVATE_CHECKPOINT/);
+			assert.equal(first.returnedMessages, 2);
+			assert.equal((await recent.readRecent({ sessionPath })).returnedMessages, 0);
+			const full = new IncrementalTranscriptCursor();
+			const page = await full.read({ sessionPath }, { detail: "full", maxMessages: 1 });
+			assert.match(page.text, /finished operation 1/);
+			assert.equal(page.returnedMessages, 1);
+			assert.equal(page.nextCursor, "completion-1");
+			const next = await full.read({ sessionPath }, { detail: "full", maxMessages: 1 });
+			assert.match(next.text, /finished operation 2/);
+			assert.equal(next.nextCursor, "completion-2");
+			assert.doesNotMatch(next.text, /PRIVATE_CHECKPOINT/);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
 	it("keeps compact evidence bounded and full details available through an independent cursor", async () => {
 		const messages = [
 			{ role: "user", content: "PARENT_TASK" },

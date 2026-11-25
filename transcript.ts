@@ -155,6 +155,12 @@ type TranscriptLineProjection = {
 	detailed: string;
 };
 
+function toolFailed(message: Record<string, unknown>): boolean {
+	const details =
+		message.details && typeof message.details === "object" ? (message.details as Record<string, unknown>) : undefined;
+	return message.isError === true || (message.toolName === "code" && details?.status === "error");
+}
+
 /** Model-facing recent evidence deliberately excludes thinking and echoed parent tasks. */
 function compactRecentMessage(
 	message: unknown,
@@ -192,14 +198,15 @@ function compactRecentMessage(
 	}
 	if (msg.role === "toolResult") {
 		const name = typeof msg.toolName === "string" ? msg.toolName : "tool";
-		const failed = msg.isError === true;
+		const failed = toolFailed(msg);
 		const text = contentProjection(msg.content, false).compact;
 		const body = failed
 			? excerpt(text || "failed", Math.min(400, perMessageChars))
 			: ["read", "grep", "find", "ls"].includes(name)
 				? `returned ${text.length} characters`
 				: excerpt(text || "completed", Math.min(160, perMessageChars));
-		const line = `${prefix}tool result (${name}${failed ? " ERROR" : ""}): ${body}`;
+		const kind = msg.deferredCompletion === true ? "tool completion" : "tool result";
+		const line = `${prefix}${kind} (${name}${failed ? " ERROR" : ""}): ${body}`;
 		return { compact: line, detailed: line };
 	}
 	return undefined;
@@ -239,11 +246,12 @@ function formatTranscriptMessageProjection(
 	}
 	if (role === "toolResult") {
 		const tool = typeof msg.toolName === "string" ? msg.toolName : "tool";
-		const error = msg.isError === true ? " ERROR" : "";
+		const error = toolFailed(msg) ? " ERROR" : "";
 		const projection = contentProjection(msg.content, false);
 		const text = projection.compact;
 		const body = truncate(text || "[no text]", perMessageChars);
-		const line = `${prefix}tool result (${tool}${error}): ${body}`;
+		const kind = msg.deferredCompletion === true ? "tool completion" : "tool result";
+		const line = `${prefix}${kind} (${tool}${error}): ${body}`;
 		return { compact: line, detailed: line };
 	}
 	return undefined;
@@ -334,6 +342,21 @@ function sessionEntryId(entry: unknown): string | undefined {
 function sessionMessageFromEntry(entry: unknown): unknown | undefined {
 	if (!entry || typeof entry !== "object") return undefined;
 	const record = entry as Record<string, unknown>;
+	if (record.type === "tool_completion" && record.result && typeof record.result === "object") {
+		const result = record.result as Record<string, unknown>;
+		const details =
+			result.details && typeof result.details === "object" ? (result.details as Record<string, unknown>) : undefined;
+		return {
+			role: "toolResult",
+			toolName: record.toolName,
+			toolCallId: record.toolCallId,
+			content: result.content,
+			isError: result.isError,
+			details: { status: details?.status },
+			deferredCompletion: true,
+			timestamp: normalizeTimestamp(record.timestamp),
+		};
+	}
 	if (record.type !== "message" || !record.message || typeof record.message !== "object") return undefined;
 	const inner = record.message as Record<string, unknown>;
 	const recordMs = normalizeTimestamp(record.timestamp);
@@ -535,7 +558,7 @@ export class IncrementalTranscriptCursor {
 				Boolean(
 					entry &&
 						typeof entry === "object" &&
-						(entry as Record<string, unknown>).type === "message" &&
+						["message", "tool_completion"].includes(String((entry as Record<string, unknown>).type)) &&
 						sessionEntryId(entry),
 				),
 			);

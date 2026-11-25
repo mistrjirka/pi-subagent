@@ -16,6 +16,7 @@ type ToolContext = {
 	ui: ExtensionUIContext;
 	sessionManager: { getSessionId: () => string };
 	hasPendingMessages: () => boolean;
+	hasPendingUserInput?: () => boolean;
 };
 type RegisteredTool = {
 	name: string;
@@ -29,12 +30,13 @@ type RegisteredTool = {
 };
 type EventHandler = (event: Record<string, unknown>, ctx: ToolContext) => void;
 
-function context(sessionId: string, hasPending = false): ToolContext {
+function context(sessionId: string, hasPending = false, hasPendingUserInput?: boolean): ToolContext {
 	return {
 		mode: "rpc",
 		ui: {} as ExtensionUIContext,
 		sessionManager: { getSessionId: () => sessionId },
 		hasPendingMessages: () => hasPending,
+		...(hasPendingUserInput === undefined ? {} : { hasPendingUserInput: () => hasPendingUserInput }),
 	};
 }
 
@@ -116,6 +118,7 @@ function harness(t: TestContext) {
 				signal?: AbortSignal;
 				timeoutSeconds?: number;
 				hasPending?: boolean;
+				hasPendingUserInput?: boolean;
 				onUpdate?: () => void;
 			} = {},
 		) {
@@ -126,7 +129,7 @@ function harness(t: TestContext) {
 				{ agent_id: options.agentId ?? "bria", timeout_seconds: options.timeoutSeconds ?? 30 },
 				options.signal,
 				options.onUpdate,
-				context(options.sessionId ?? "parent-a", options.hasPending),
+				context(options.sessionId ?? "parent-a", options.hasPending, options.hasPendingUserInput),
 			);
 		},
 		emit,
@@ -167,6 +170,25 @@ describe("agent_wait user input", () => {
 		await assertPending(next);
 		await h.complete(child.agent);
 		assert.equal((await next).content[0]?.text, "Child result");
+	});
+
+	it("does not label already queued background notifications as user input", async (t) => {
+		const h = harness(t);
+		const child = h.child();
+		const pending = h.run({ hasPending: true, hasPendingUserInput: false });
+		await assertPending(pending);
+		await h.complete(child.agent);
+		const result = await pending;
+		assert.equal(result.details.interruptedByUser, undefined);
+		assert.equal(result.content[0]?.text, "Child result");
+	});
+
+	it("releases for an accepted user input reported by the precise queue query", async (t) => {
+		const h = harness(t);
+		const child = h.child();
+		const result = await h.run({ hasPending: true, hasPendingUserInput: true });
+		assert.equal(result.details.interruptedByUser, true);
+		assert.equal(child.stopCalls, 0);
 	});
 
 	for (const source of ["rpc", "interactive"]) {

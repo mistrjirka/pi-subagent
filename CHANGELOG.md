@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.30 — actionable agent communication
+
+- Clarify that agent_send is for messages requiring recipient action before completion, not routine progress or completion summaries.
+- Preserve immediate coordination, urgent risks and ask_parent decision paths.
+
 ## 0.5.29 — measure child model performance
 
 - Measure each child's first-output latency and token throughput from raw RPC events and provider-reported token usage.

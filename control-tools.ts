@@ -110,10 +110,13 @@ export function registerControlTools(pi: ExtensionAPI, ports: ControlToolsPorts)
 	pi.registerTool({
 		name: "agent_send",
 		label: "Send Message",
-		description: "Send a message to another agent — a sub-agent or your parent.",
+		description:
+			"Send actionable instructions, dependencies, ownership conflicts or urgent risks to another agent. Do not send routine progress or completion summaries.",
 		promptSnippet: "Send a message to a sub-agent or your parent",
 		promptGuidelines: [
-			"Send follow-up instructions to a running or idle agent with agent_send; its context is intact.",
+			"Send actionable follow-up instructions to a running or idle agent; its context is intact.",
+			"Before sending, identify what the recipient needs to do differently before you can finish. If no action is needed, continue independently and include the evidence in your final result. Do not send routine discoveries, status, successful tests, acknowledgements or completion summaries.",
+			"Use ask_parent for a material decision or missing information that blocks further progress; use agent_send for actionable coordination or urgent risk.",
 			"When a child is waiting after ask_parent, answer that exact child id with agent_send kind=answer. Ordinary instructions do not wake a waiting child.",
 			"The backend or contract owner chooses routine DTO/type names using existing code conventions; consumers read the current generated/source contract. Do not prescribe or repeatedly rename details without a verified incompatibility or a user requirement.",
 			"Child messages are asynchronous snapshots, not guaranteed current state. Before correcting a child, compare the message's sent time with newer updates and the current affected files. Intervene for genuine blockers, risks, ownership conflicts, or verified defects, not reassurance or stale progress.",

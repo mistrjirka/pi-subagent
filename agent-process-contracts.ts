@@ -1,7 +1,8 @@
-import type { RequestPerformance } from "./request-performance.js";
 /** Typed process options and completion contracts, independent of transport. */
 import type { AgentActivity, AgentEvent, AgentTreeEvent } from "./event-interpret.js";
+import type { MonitoringProgress } from "./monitoring-progress.js";
 import type { AgentMessage, AgentQuestion } from "./protocol.js";
+import type { RequestPerformance } from "./request-performance.js";
 
 export type AgentStatus = "queued" | "running" | "completed" | "failed" | "stopped";
 
@@ -20,6 +21,7 @@ export interface AgentCompletion {
 	generation?: number;
 	status: TerminalStatus;
 	output: string;
+	progress?: MonitoringProgress;
 	stats: AgentStats;
 	sessionPath?: string;
 	sessionId?: string;

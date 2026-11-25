@@ -1,4 +1,5 @@
 import { closeSync, fstatSync, openSync, readSync } from "node:fs";
+import { excerpt } from "./monitoring-progress.js";
 import { SessionEntryCursor } from "./session-transcript.js";
 import { formatStamp } from "./time.js";
 import type { RenderEvent } from "./types.js";
@@ -13,6 +14,7 @@ import type { RenderEvent } from "./types.js";
  */
 
 export interface TranscriptFormatOptions {
+	detail?: "recent" | "full";
 	maxMessages?: number;
 	maxChars?: number;
 	perMessageChars?: number;
@@ -153,12 +155,64 @@ type TranscriptLineProjection = {
 	detailed: string;
 };
 
+/** Model-facing recent evidence deliberately excludes thinking and echoed parent tasks. */
+function compactRecentMessage(
+	message: unknown,
+	perMessageChars: number,
+	timestampMs?: number,
+	nowMs: number = Date.now(),
+): TranscriptLineProjection | undefined {
+	if (!message || typeof message !== "object") return undefined;
+	const msg = message as Record<string, unknown>;
+	const prefix = timestampMs !== undefined ? `[${formatStamp(timestampMs, nowMs)}] ` : "";
+	if (msg.role === "assistant") {
+		const parts: unknown[] = Array.isArray(msg.content) ? msg.content : [];
+		const lines: string[] = [];
+		for (const item of parts) {
+			if (!item || typeof item !== "object") continue;
+			const part = item as Record<string, unknown>;
+			if (part.type === "text" && typeof part.text === "string" && part.text.trim()) {
+				lines.push(excerpt(part.text, 300));
+			} else if (part.type === "toolCall" && typeof part.name === "string") {
+				const args =
+					part.arguments && typeof part.arguments === "object" ? (part.arguments as Record<string, unknown>) : {};
+				const key = ["path", "command", "pattern", "query", "to", "agent_id", "code"].find(
+					(k) => typeof args[k] === "string",
+				);
+				const raw = key ? args[key] : undefined;
+				const value = typeof raw === "string" ? excerpt(raw, 180) : "";
+				lines.push(`[tool call] ${part.name}${value ? " " + value : ""}`);
+			}
+		}
+		if (typeof msg.errorMessage === "string" && msg.errorMessage)
+			lines.push(`[error] ${excerpt(msg.errorMessage, 300)}`);
+		if (!lines.length) return undefined;
+		const line = `${prefix}assistant: ${truncate(lines.join("\n"), perMessageChars)}`;
+		return { compact: line, detailed: line };
+	}
+	if (msg.role === "toolResult") {
+		const name = typeof msg.toolName === "string" ? msg.toolName : "tool";
+		const failed = msg.isError === true;
+		const text = contentProjection(msg.content, false).compact;
+		const body = failed
+			? excerpt(text || "failed", Math.min(400, perMessageChars))
+			: ["read", "grep", "find", "ls"].includes(name)
+				? `returned ${text.length} characters`
+				: excerpt(text || "completed", Math.min(160, perMessageChars));
+		const line = `${prefix}tool result (${name}${failed ? " ERROR" : ""}): ${body}`;
+		return { compact: line, detailed: line };
+	}
+	return undefined;
+}
+
 function formatTranscriptMessageProjection(
 	message: unknown,
 	perMessageChars = DEFAULT_PER_MESSAGE_CHARS,
 	timestampMs?: number,
 	nowMs: number = Date.now(),
+	detail: "recent" | "full" = "full",
 ): TranscriptLineProjection | undefined {
+	if (detail === "recent") return compactRecentMessage(message, perMessageChars, timestampMs, nowMs);
 	if (!message || typeof message !== "object") return undefined;
 	const prefix =
 		timestampMs !== undefined && Number.isFinite(timestampMs) ? `[${formatStamp(timestampMs, nowMs)}] ` : "";
@@ -219,7 +273,7 @@ export function formatTranscript(
 			// formatTranscriptMessage only ever sees a finite epoch-ms or nothing.
 			const timestampMs =
 				message && typeof message === "object" ? messageTimestampMs(message as Record<string, unknown>) : undefined;
-			return formatTranscriptMessageProjection(message, perMessageChars, timestampMs, nowMs);
+			return formatTranscriptMessageProjection(message, perMessageChars, timestampMs, nowMs, options.detail);
 		})
 		.filter((line): line is TranscriptLineProjection => Boolean(line));
 	if (!rendered.length) return "[no transcript messages yet]";
@@ -307,7 +361,7 @@ function renderUnreadEntryPage(
 		if (alreadyShown?.has(entryId)) continue;
 		const timestampMs =
 			message && typeof message === "object" ? messageTimestampMs(message as Record<string, unknown>) : undefined;
-		const line = formatTranscriptMessageProjection(message, perMessageChars, timestampMs, nowMs);
+		const line = formatTranscriptMessageProjection(message, perMessageChars, timestampMs, nowMs, options.detail);
 		if (line) rendered.push({ entryId, line });
 	}
 
@@ -512,7 +566,13 @@ export class IncrementalTranscriptCursor {
 				const message = sessionMessageFromEntry(entry);
 				const timestampMs =
 					message && typeof message === "object" ? messageTimestampMs(message as Record<string, unknown>) : undefined;
-				const line = formatTranscriptMessageProjection(message, perMessageChars, timestampMs);
+				const line = formatTranscriptMessageProjection(
+					message,
+					perMessageChars,
+					timestampMs,
+					Date.now(),
+					options.detail,
+				);
 				if (!line) continue;
 				const cost = line.detailed.length + (lines.length ? 2 : 0);
 				if (lines.length && used + cost > maxChars) break;

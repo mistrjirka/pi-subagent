@@ -70,13 +70,18 @@ export const WaitParamsSchema = Type.Object({
 });
 
 export const InspectParamsSchema = Type.Object({
+	mode: Type.Optional(
+		Type.Union([Type.Literal("recent"), Type.Literal("full")], {
+			description: "Recent compact evidence (default), or full paginated transcript. Full has a separate cursor.",
+		}),
+	),
 	agent_id: Type.String({ description: 'The direct child id to inspect (e.g. "@max").' }),
 	max_messages: Type.Optional(
 		Type.Integer({
 			minimum: 1,
 			maximum: 30,
 			description:
-				"Maximum number of unread child conversation messages to return in this page. Defaults to 12; later unread messages remain for the next read.",
+				"Maximum number of unread child conversation messages to return in this page. Defaults to 8 for recent, 12 for full; older detail remains available via full.",
 		}),
 	),
 });

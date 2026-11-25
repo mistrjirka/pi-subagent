@@ -13,8 +13,8 @@ The runtime deliberately does very little orchestration. The **parent Pi decides
 - **All normal Pi tools.** The runtime does not impose per-agent tool allowlists.
 - **Explicit delegation.** A child may spawn only exact agent names listed in its profile's `allowed_subagents`. Omitted means none.
 - **Persistent workers.** A child can stay resident after finishing and be continued with `agent_send` in the same context.
-- **Explicit wait.** `agent_wait` uses a 3-minute supervision window by default (or a caller-chosen window); expiry returns latest activity plus the next unread transcript page shared with `agent_inspect`, and never stops the child.
-- **Fallback supervision.** When the root parent ends a turn with a background/resumed child still running, a 3-minute unsupervised clock starts. The reminder includes latest activity plus a short transcript tail and repeats after later idle turns until the parent waits, inspects, steers, stops, or the child settles.
+- **Explicit wait.** `agent_wait` uses a 3-minute supervision window by default (or a caller-chosen window); expiry returns compact activity, new tool errors and tracked edited files, and never stops the child.
+- **Fallback supervision.** When the root parent ends a turn with a background/resumed child still running, a 3-minute unsupervised clock starts. The reminder includes latest activity and new tool errors and repeats after later idle turns until the parent waits, inspects, steers, stops, or the child settles.
 - **Escalation path.** `ask_parent` lets a child yield on material ambiguity, a non-obvious diagnosis, or a material implementation decision; its immediate parent answers the same resident context with `agent_send`.
 - **PiTTy bridge.** Spawn details expose a small direct-control directory for live inspection, steer, and stop. This does not emulate the old `pi-subagents` workflow runtime.
 
@@ -339,13 +339,13 @@ Wait for a direct child that is running in the background or has been resumed wi
 { "agent_id": "@max" }
 ```
 
-With no explicit timeout, `agent_wait` uses a **180-second supervision window**. It returns sooner if the child completes/fails/stops or reaches `ask_parent`. If the child settled earlier in the current parent turn, `agent_wait` consumes that cached settlement and suppresses the otherwise-pending completion/question notification, so the same result is not delivered again after the turn. If the child is still running after 3 minutes, it returns latest activity plus only transcript messages not already returned by `agent_wait`/`agent_inspect`, then asks the parent to check progress. The child keeps running. `timeout_seconds` changes only this wait window:
+With no explicit timeout, `agent_wait` uses a **180-second supervision window**. It returns sooner if the child completes/fails/stops or reaches `ask_parent`. If the child settled earlier in the current parent turn, `agent_wait` consumes that cached settlement and suppresses the otherwise-pending completion/question notification, so the same result is not delivered again after the turn. If the child is still running after 3 minutes, it returns latest activity, tool-result and error counts, a bounded latest assistant update, and tracked edited files since the last check. No transcript is injected. The child keeps running. `timeout_seconds` changes only this wait window:
 
 ```json
 { "agent_id": "@max", "timeout_seconds": 150 }
 ```
 
-When the 150-second window expires, the result says the child is still running and includes its latest activity plus an unread transcript page. `agent_wait` and `agent_inspect` share one append-ordered Pi session-entry cursor, so transcript messages already returned by either tool are not repeated. Compare new evidence with the assigned scope and last correction to judge whether the child is making real progress. Read older history with `agent_inspect` only to resolve a problem or decision, not merely to drain unread pages. If progress remains aligned, wait again without reassurance messages, document updates, or repeated audits. Inspect or steer with `agent_send` for a concrete blocker, scope drift, repeated failure, or necessary coordination. Stop the child when needed. A timeout or long-running command alone is not a stall. Use completion results already delivered rather than fetching them again. `timeout_seconds: 0` is an immediate status snapshot. Omitting the field uses the 180-second default.
+When the 150-second window expires, the result says the child is still running and includes its compact progress status, without copying tool arguments, successful tool outputs or thinking into the parent context. Compare new evidence with the assigned scope and last correction to judge whether the child is making real progress. Read recent evidence with `agent_inspect` only to resolve a problem or decision, and use its full mode when needed. If progress remains aligned, wait again without reassurance messages, document updates, or repeated audits. Inspect or steer with `agent_send` for a concrete blocker, scope drift, repeated failure, or necessary coordination. Stop the child when needed. A timeout or long-running command alone is not a stall. Use completion results already delivered rather than fetching them again. `timeout_seconds: 0` is an immediate status snapshot. Omitting the field uses the 180-second default.
 
 For root background/resumed children, the runtime also has a fallback supervision reminder: when the root parent ends its turn with a child still running, it starts a 3-minute unsupervised clock. If the parent has not resumed supervision before that window expires, the runtime injects a follow-up telling the parent to check the child and includes the latest activity. A new parent turn pauses the clock; if that turn ends with the child still running, a fresh 3-minute window begins. This is **not** a task timeout and never cancels the child.
 
@@ -353,19 +353,26 @@ Use `agent_wait` instead of shell `sleep`/poll loops when waiting for subagents.
 
 ### `agent_inspect`
 
-Read a live direct child's state and the next unread Pi conversation transcript page without changing the child:
+Read a direct child's state and recent compact evidence without changing the child:
 
 ```json
-{ "agent_id": "@max", "max_messages": 12 }
+{ "agent_id": "@max" }
+
 ```
 
-Incremental reads page the persisted child session first and use Pi RPC `get_entries(since)` when that file is unavailable. `agent_wait` and `agent_inspect` share one cursor: each successful read continues after the last consumed page. `max_messages` defaults to 12 and may be 1–30; later unread messages remain for the next read. The cursor is committed only after formatting. Read failures are reported as errors and do not consume unread messages. A partial append stays unread until its newline arrives. Bounded scans may report an **at least** unread count.
+Default `mode: "recent"` returns newest unread evidence first, excluding thinking and echoed parent instructions. It keeps short tool arguments and result excerpts, assistant updates and errors. The transcript budget is 2,200 characters; `max_messages` defaults to 8 (1–30). Wait and inspect share only the edited-file and progress counters. For detailed history, call:
 
-Pages include parent follow-ups, assistant text, tool calls, tool results, and available plaintext thinking. The **final character budget includes reasoning and omission markers**; reasoning uses spare space within the selected message rather than expanding the output beyond the limit. Full traces remain in the child session and live UI. Completed children remain inspectable through their cached result. Reading that completed result acknowledges its pending notification. Partial transcript pages do not acknowledge unseen results. Unread completions are delivered at a safe parent tool/model boundary. **If the same child already sent a substantive `agent_send` update visible to the parent during its current task**, the completion is appended as a visible session notification without starting another model turn. Otherwise the original proactive wake-up remains. A message still queued for delivery or a diagnostic ping does not suppress the wake-up. Explicit `agent_wait`/`agent_inspect` consumption still acknowledges the final result. `ask_parent` remains urgent and immediately delivered. The completion always remains available in session history and the agent inspector.
+```json
+{ "agent_id": "@max", "mode": "full", "max_messages": 12 }
+```
+
+Full mode has an independent, append-ordered cursor and returns the previous detailed transcript (up to 20,000 characters, with thinking where available). Compact inspection never consumes full evidence. Full pages use persisted session entries first, falling back to Pi RPC `get_entries(since)` when needed. Full `max_messages` defaults to 12. A partial append stays unread until its newline arrives. Read failures are reported without consuming full history.
+
+Edited-file tracking uses successful direct `edit`/`write` results and successful nested calls reported by `code`. Files are deduplicated per child and per inspection interval; the total is scoped to the current child process, including its resident follow-ups. A write may be a new file or an overwrite. Shell commands and tools without attributable structured write evidence may change other files; those writes are not guessed from shared Git state. Full traces remain in the child session and live UI. Completed children remain inspectable through their cached result. Reading that completed result acknowledges its pending notification. Partial transcript pages do not acknowledge unseen results. Unread completions are delivered at a safe parent tool/model boundary. **If the same child already sent a substantive `agent_send` update visible to the parent during its current task**, the completion is appended as a visible session notification without starting another model turn. Otherwise the original proactive wake-up remains. A message still queued for delivery or a diagnostic ping does not suppress the wake-up. Explicit `agent_wait`/`agent_inspect` consumption still acknowledges the final result. `ask_parent` remains urgent and immediately delivered. The completion always remains available in session history and the agent inspector.
 
 Notification usage separates **cumulative tokens (including cache)** across requests, **generated tokens**, and **estimated context tokens**. Context is omitted when Pi reports it unknown, such as immediately after compaction.
 
-Use `agent_inspect` when a wait-window page is not enough, or when `agent_wait` reports more unread messages remain. It is read-only with respect to the child: it advances only the parent-side transcript cursor and does not pause, steer, resume, or stop the child.
+Use `agent_inspect` when a compact wait status is not enough. It is read-only with respect to the child: it advances only the parent-side transcript cursor and does not pause, steer, resume, or stop the child.
 
 ### `agent_send`
 

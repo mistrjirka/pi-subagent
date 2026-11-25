@@ -30,7 +30,12 @@ type RegisteredTool = {
 type EventHandler = (event: Record<string, unknown>, ctx: ToolContext) => void;
 
 function context(sessionId: string, hasPending = false): ToolContext {
-	return { mode: "rpc", ui: {} as ExtensionUIContext, sessionManager: { getSessionId: () => sessionId }, hasPendingMessages: () => hasPending };
+	return {
+		mode: "rpc",
+		ui: {} as ExtensionUIContext,
+		sessionManager: { getSessionId: () => sessionId },
+		hasPendingMessages: () => hasPending,
+	};
 }
 
 function harness(t: TestContext) {
@@ -47,11 +52,13 @@ function harness(t: TestContext) {
 	const registry = new AgentRegistry({ notify: () => {}, supervisionIntervalMs: 0 });
 	t.after(() => registry.shutdown());
 	let transcriptReads = 0;
+	const transcriptRequests: Array<{ detail?: "recent" | "full"; maxMessages: number; newestFirst?: boolean }> = [];
 	const ports: MonitoringPorts = {
 		registry,
 		captureUi: () => {},
-		unreadTranscript: async () => {
+		unreadTranscript: async (_agent, options, newestFirst) => {
 			transcriptReads++;
+			transcriptRequests.push({ detail: options.detail, maxMessages: options.maxMessages, newestFirst });
 			return { text: "", source: "none", returnedMessages: 0, remainingMessages: 0, hasMore: false };
 		},
 		activitySummary: () => "working",
@@ -70,6 +77,12 @@ function harness(t: TestContext) {
 	return {
 		registry,
 		handlers,
+		transcriptRequests,
+		inspect(params: Record<string, unknown> = {}) {
+			const tool = tools.get("agent_inspect");
+			assert.ok(tool);
+			return tool.execute("inspect-1", { agent_id: "bria", ...params }, undefined, undefined, context("parent-a"));
+		},
 		get transcriptReads() {
 			return transcriptReads;
 		},
@@ -331,5 +344,30 @@ describe("agent_wait user input", () => {
 		await assertPending(pending);
 		await h.complete(child.agent);
 		assert.equal((await pending).content[0]?.text, "Child result");
+	});
+});
+
+describe("compact parent monitoring", () => {
+	it("wait snapshots do not read transcripts; inspect requests recent evidence by default", async (t) => {
+		const h = harness(t);
+		const { agent } = h.child();
+		agent.getMonitoringProgress = () => ({
+			tools: 3,
+			errors: 1,
+			lastError: "specific failure",
+			editedFiles: ["src/a.ts"],
+			remainingFiles: 0,
+			totalFiles: 1,
+			shellCalls: 0,
+		});
+		const wait = await h.run({ timeoutSeconds: 0 });
+		assert.match(wait.content[0]?.text ?? "", /src\/a\.ts/);
+		assert.match(wait.content[0]?.text ?? "", /specific failure/);
+		assert.equal(h.transcriptReads, 0);
+		const recent = await h.inspect();
+		assert.match(recent.content[0]?.text ?? "", /src\/a\.ts/);
+		assert.deepEqual(h.transcriptRequests[0], { detail: "recent", maxMessages: 8, newestFirst: true });
+		await h.inspect({ mode: "full" });
+		assert.deepEqual(h.transcriptRequests[1], { detail: "full", maxMessages: 12, newestFirst: false });
 	});
 });

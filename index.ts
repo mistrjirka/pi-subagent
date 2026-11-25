@@ -164,18 +164,19 @@ function toErrorResult(err: unknown): {
 export default function (pi: ExtensionAPI) {
 	registerToolErrorHook(pi);
 
-	// One shared transcript reader per direct child. Wait prioritizes new progress;
-	// inspect backfills older unread history. Delivered entries are not repeated.
+	// Separate compact-recent and full-history cursors. A compact view never consumes full evidence.
 	const transcriptCursors = new Map<string, IncrementalTranscriptCursor>();
+	const recentTranscriptCursors = new Map<string, IncrementalTranscriptCursor>();
 	const unreadTranscript = (
-		agent: RegisteredAgent,
-		options: { maxMessages: number; maxChars: number; perMessageChars: number },
+		agent: Pick<RegisteredAgent, "agentId" | "sessionPath" | "getEntries">,
+		options: { maxMessages: number; maxChars: number; perMessageChars: number; detail?: "recent" | "full" },
 		newestFirst = false,
 	) => {
-		let cursor = transcriptCursors.get(agent.agentId);
+		const cursors = options.detail === "recent" ? recentTranscriptCursors : transcriptCursors;
+		let cursor = cursors.get(agent.agentId);
 		if (!cursor) {
 			cursor = new IncrementalTranscriptCursor();
-			transcriptCursors.set(agent.agentId, cursor);
+			cursors.set(agent.agentId, cursor);
 		}
 		return newestFirst ? cursor.readRecent(agent, options) : cursor.read(agent, options);
 	};

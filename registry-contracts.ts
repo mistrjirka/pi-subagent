@@ -2,6 +2,7 @@
 import type { WidgetResult } from "@everyx/pi-ui/widget.js";
 import type { AgentCompletion } from "./agent-process.js";
 import type { AgentActivity } from "./event-interpret.js";
+import type { MonitoringProgress } from "./monitoring-progress.js";
 import type { AgentMessage, AgentQuestion } from "./protocol.js";
 import type { RenderEvent } from "./types.js";
 
@@ -22,6 +23,7 @@ export interface RegisteredAgent {
 	readonly shouldStayResident?: boolean;
 	/** Latest live activity used by wait-timeout/supervision snapshots. */
 	getLatestActivity?: () => AgentActivity | undefined;
+	getMonitoringProgress?: (consume?: boolean) => MonitoringProgress;
 	/** Actual live Pi conversation messages for transcript inspection. */
 	getMessages?: () => Promise<unknown[]>;
 	/** Append-ordered Pi session entries; `since` is a stable entry id cursor. */

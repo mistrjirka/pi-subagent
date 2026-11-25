@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.31 — compact subagent monitoring
+
+- Return incremental tool errors and attributable edited files on wait timeouts, without copying child transcripts.
+- Default inspection to compact recent evidence; retain a separate full transcript cursor.
+- Keep supervision reminders compact and retain existing urgent and completion delivery behavior.
+- Track successful direct and nested writes per child, not shared Git diffs. Arbitrary shell writes may be untracked.
+
 ## 0.5.30 — actionable agent communication
 
 - Clarify that agent_send is for messages requiring recipient action before completion, not routine progress or completion summaries.

@@ -28,9 +28,14 @@ import type {
 import { AgentSettlementLatch } from "./agent-settlement-latch.js";
 import type { AgentTreeEvent } from "./event-interpret.js";
 import { type AgentActivity, interpretEvent } from "./event-interpret.js";
+import { type MonitoringProgress, MonitoringProgressTracker } from "./monitoring-progress.js";
 import type { AgentMessage, AgentQuestion, RpcCommand, RpcEvent } from "./protocol.js";
+import {
+	type RequestModelSnapshot,
+	type RequestPerformance,
+	RequestPerformanceTracker,
+} from "./request-performance.js";
 import { RpcClient, type RpcClientOptions } from "./rpc-client.js";
-import { RequestPerformanceTracker, type RequestPerformance, type RequestModelSnapshot } from "./request-performance.js";
 import type { RenderEvent } from "./types.js";
 
 export type { AgentCompletion, AgentProcessOptions, AgentSessionEntryPage } from "./agent-process-contracts.js";
@@ -82,6 +87,7 @@ export class AgentProcess {
 	/** Model API error captured from agent_end (stopReason "error"). */
 	private agentError: string | null = null;
 	private readonly activity: AgentActivityFold;
+	private readonly monitoringProgress: MonitoringProgressTracker;
 	private readonly performance = new RequestPerformanceTracker();
 	private readonly selectedModel: RequestModelSnapshot | undefined;
 	private readonly onPerformance: ((performance: RequestPerformance) => void) | undefined;
@@ -94,13 +100,15 @@ export class AgentProcess {
 
 	constructor(options: AgentProcessOptions, deps: AgentProcessDeps = {}) {
 		this.agentId = options.agentId;
+		this.monitoringProgress = new MonitoringProgressTracker(options.cwd);
 		this.label = options.label;
 		this.taskSummary = options.taskSummary?.replace(/\s+/g, " ").trim().slice(0, 140);
 		this.model = options.model;
 		const separator = options.model?.indexOf("/") ?? -1;
-		this.selectedModel = options.model && separator > 0
-			? { provider: options.model.slice(0, separator), id: options.model.slice(separator + 1) }
-			: undefined;
+		this.selectedModel =
+			options.model && separator > 0
+				? { provider: options.model.slice(0, separator), id: options.model.slice(separator + 1) }
+				: undefined;
 		this.onPerformance = options.onPerformance;
 		this.thinking = options.thinking;
 		this.persistent = options.persistent ?? false;
@@ -353,6 +361,7 @@ export class AgentProcess {
 			},
 			sessionPath: this.sessionPath,
 			sessionId: this.sessionId,
+			progress: this.monitoringProgress.snapshot(false),
 		};
 	}
 
@@ -418,6 +427,10 @@ export class AgentProcess {
 		return this.performance.value;
 	}
 
+	getMonitoringProgress(consume = true): MonitoringProgress {
+		return this.monitoringProgress.snapshot(consume);
+	}
+
 	getLatestActivity(): AgentActivity | undefined {
 		return this.activity.latestActivity();
 	}
@@ -443,10 +456,15 @@ export class AgentProcess {
 	private readonly resumeSessionPath: string | undefined;
 
 	private onEvent(event: RpcEvent): void {
+		this.monitoringProgress.handle(event);
 		// Observe the uncoalesced RPC stream before translating it into UI events.
 		const sample = this.performance.handle(event, Date.now(), this.selectedModel);
 		if (sample) {
-			try { this.onPerformance?.(sample); } catch { /* Metrics never interrupt an agent. */ }
+			try {
+				this.onPerformance?.(sample);
+			} catch {
+				/* Metrics never interrupt an agent. */
+			}
 		}
 
 		// Raw protocol shapes are interpreted in event-interpret.ts — the only
